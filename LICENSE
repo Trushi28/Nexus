@@ -1,0 +1,25 @@
+Copyright (C) 2026 and contributors
+
+Permission to use, copy, modify, and/or distribute this software for
+any purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+This is the 0BSD license, used because it is what upstream Limine
+templates use. Third-party build-time dependencies fetched by
+kernel/get-deps keep their own licenses:
+
+  - include/limine.h        -- BSD-2-Clause (Limine-Bootloader/limine-protocol)
+  - include/font8x8_basic.h -- Public Domain (dhepper/font8x8, derived from
+                                the classic IBM public-domain VGA font)
+
+Neither file is vendored in this repository; get-deps downloads them
+fresh at build time (see kernel/get-deps).
