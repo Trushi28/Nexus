@@ -60,6 +60,76 @@ been verified and what's honestly still missing. See the main
   rendezvous under a dedicated lock (`wait_lock` in `sched/sched.c`),
   closing the race properly rather than reusing a primitive that wasn't
   built for a single, non-repeating signal.
+  - **A cross-cpu publish-before-safe race, present in three places, two
+  of them since the very first scheduler code**: any time a task left
+  TASK_RUNNING, whatever queue it was headed for (the ready queue on
+  preemption, sleep_head on sched_sleep_ms(), or -- fixed in an
+  earlier pass -- an external wake reaching a blocked task) could
+  become visible to OTHER cpus before this cpu's own context_switch()
+  had actually made that task's saved rsp valid to resume from. The
+  preemption case (every task, every quantum) was the hottest and
+  longest-standing instance and had never been touched by either
+  earlier fix. Closed uniformly: cpu_local::parked_head is the only
+  place a task is EVER made visible again after leaving TASK_RUNNING,
+  it's only ever touched by its OWNING cpu, and it's drained (into the
+  real ready queue, or into sleep_head) only at the top of that same
+  cpu's own next schedule() call -- the one place that can prove the
+  switch away already completed. A DIFFERENT bug turned up designing
+  this unification: wake_blocked_task()'s earlier "fast path" (enqueue
+  directly if switched_away was already true) could race the owning
+  cpu's own drain loop over the same task->next field, corrupting
+  parked_head and potentially double-enqueuing the same task. Fixed by
+  removing that fast path entirely -- every external waker now only
+  ever flips a state flag; the owning cpu's own drain loop is the sole
+  writer to parked_head and the sole caller of enqueue_ready() for
+  anything it holds. Cost: up to one quantum (~10ms) of added wake
+  latency in the worst case, in exchange for a mechanism with exactly
+  one writer per list under every interleaving. See sched/sched.c's
+  wake_blocked_task() and schedule().
+- **Table-driven shell dispatch, not an if/else chain**: `shell/shell.c`'s
+  `commands[]` is the single source of truth for every command's name,
+  handler, usage string, and one-line help blurb -- `cmd_help()` renders
+  itself from it, `dispatch()` looks up against it, tab-completion and
+  the fuzzy "did you mean" search it too. Replaces N separate
+  str_has_prefix(cmd, "foo ") checks (which had a real bug: "echoFoo"
+  used to trigger the echo branch, no word-boundary check) with one
+  general verb/args split.
+- **Non-POSIX shell heuristics**: a small synonym table lets several
+  spellings of a command execute identically (list==ls, tasks==ps, ...
+  -- see `aliases`); an unrecognised command gets a "did you mean"
+  computed via integer Levenshtein distance (no floats -- this build is
+  -mno-sse/-mno-mmx/-mno-80387); a lazy-decay integer frecency score
+  per command (halve on use, add a fixed bonus -- no timers, no
+  background pass) powers both `topcmds` and tie-breaking in
+  suggestions. Tab completes command names always, and VFS path
+  segments for the last argument.
+  - **Graph FS persistence is a whole-graph snapshot, not a live on-disk
+  structure**: graph_save_to_disk()/graph_load_from_disk() (fs/graph.c)
+  serialize/deserialize the entire in-memory graph in one shot to/from
+  the NVMe namespace -- "save game", not a journaled filesystem with
+  its own block allocator. Kept deliberately this simple for the same
+  reason NVMe went polled before MSI-X and PCI came before NVMe at
+  all: prove the boring, obviously-correct version first. Node ids are
+  preserved exactly across a save/load round-trip; refcounts are never
+  stored -- they're fully recomputed by replaying the same
+  graph_link()/sstring_set() calls used during normal operation, which
+  also means a load exercises the identical code path a live gmk/glink
+  session would, rather than a separate, easier-to-get-wrong
+  reconstruction path.
+  - **Graph FS deletion is plain refcounting, not a garbage collector**:
+  graph_unlink()/sstring_unset()/graph_node_delete() (fs/graph.c) free
+  a node the instant its refcount hits 0, cascading through whatever
+  it pointed to. Iterative, not recursive (an explicit worklist via
+  struct gnode::release_next, mirroring sched.c's pending_exit/
+  parked_head pattern) so a long chain being released can't blow the
+  kernel stack. No force-delete exists -- a still-referenced node
+  refuses to go, since forcing it would leave dangling edges. The one
+  permanent gap: reference cycles never reach refcount 0 through edge
+  decrements and are never freed this way; graph_clear_all() (`gclear`)
+  is the closest thing to a way out and honestly reports what's left
+  over if something's cyclic. Closing that gap for real needs a
+  mark-and-sweep pass, which is meaningfully more work and not v1
+  scope.
 
 ## Known limitations
 
@@ -92,11 +162,27 @@ been verified and what's honestly still missing. See the main
   a mount table would dispatch through.
 - The ELF loader only accepts static, non-PIE `ET_EXEC` binaries — no
   dynamic linking, no relocations, no PIE.
-- The NVMe driver is polled (no MSI-X interrupt wiring yet, though
-  drivers/pci.h already has the capability), single-namespace,
-  single-I/O-queue, and caps a single request at ~2MiB (one PRP-list
-  page, not chained). Buffers must be page-aligned. See the comment at
-  the top of drivers/nvme.c for the reasoning.
+- The NVMe driver is single-namespace, single-I/O-queue, and caps a
+  single request at ~2MiB (one PRP-list page, not chained). Buffers
+  must be page-aligned. Command completion is MSI-X-driven (admin
+  queue on vector 0, I/O queue on vector 1) with no timeout on the
+  wait -- consistent with every other blocking wait in this kernel; see
+  the comment on drivers/nvme.c's submit_and_wait().
+  - Tab-completion's path matching only understands the classic VFS
+  namespace ("/", tmpfs, the initrd) -- graph-FS paths (gcat/gls/
+  sstring targets) don't complete yet.
+- The graph filesystem (fs/graph.c) can free nodes now (grm/gunlink/
+  sstringrm/gclear -- plain refcounting, see the design note above),
+  but reference cycles permanently leak: a node only reachable through
+  a cycle is never freed short of a reboot. graph_load_from_disk()
+  still refuses to run against a non-empty in-memory graph -- run
+  gclear first if you want to reload mid-session. A node created after
+  a gload draws its id from the restored counter, which can numerically
+  reuse an id that existed earlier in the same session (never one
+  currently live -- just a cosmetic wrinkle worth knowing about).
+  Persistence itself is still a whole-graph snapshot (gsync/gload), not
+  continuous durability, capped at GRAPH_SNAPSHOT_MAX_BYTES (1MiB by
+  default). One coarse lock covers the whole graph.
 
 ## Verification performed here
 
