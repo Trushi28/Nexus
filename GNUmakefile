@@ -71,6 +71,32 @@ run-hdd-uefi: edk2-ovmf-bins $(IMAGE_NAME).hdd
 		-hda $(IMAGE_NAME).hdd \
 		$(QEMUFLAGS)
 
+NVME_IMG := nvme_test.img
+
+$(NVME_IMG):
+	qemu-img create -f raw $(NVME_IMG) 64M
+
+.PHONY: run-nvme
+run-nvme: $(IMAGE_NAME).iso $(NVME_IMG)
+	qemu-system-x86_64 \
+		-M q35 \
+		-cdrom $(IMAGE_NAME).iso \
+		-boot d \
+		-drive file=$(NVME_IMG),if=none,id=nvmedrive,format=raw \
+		-device nvme,drive=nvmedrive,serial=deadbeef \
+		$(QEMUFLAGS)
+
+.PHONY: run-nvme-uefi
+run-nvme-uefi: edk2-ovmf-bins $(IMAGE_NAME).iso $(NVME_IMG)
+	qemu-system-x86_64 \
+		-M q35 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf-bins/ovmf-code-x86_64.fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-boot d \
+		-drive file=$(NVME_IMG),if=none,id=nvmedrive,format=raw \
+		-device nvme,drive=nvmedrive,serial=deadbeef \
+		$(QEMUFLAGS)
+
 edk2-ovmf-bins:
 	curl -L https://github.com/osdev0/edk2-ovmf-stable-bins/releases/latest/download/edk2-ovmf-bins.tar.gz | gunzip | tar -xf -
 

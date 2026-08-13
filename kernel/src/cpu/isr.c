@@ -87,7 +87,34 @@ static void dump_and_panic(struct interrupt_frame *f) {
 
   panic("unhandled CPU exception");
 }
+extern char __copy_from_user_fault_ip[], __copy_from_user_fixup[];
+extern char __copy_to_user_fault_ip[], __copy_to_user_fixup[];
 
+struct extable_entry {
+  uint64_t fault_ip;
+  uint64_t fixup_ip;
+};
+
+/* Deliberately tiny/linear -- this will only ever hold a handful of
+ * entries (the risky instruction inside each copy_*_user() primitive),
+ * so a linear scan beats reaching for anything fancier. */
+static const struct extable_entry extable[] = {
+    {(uint64_t)__copy_from_user_fault_ip, (uint64_t)__copy_from_user_fixup},
+    {(uint64_t)__copy_to_user_fault_ip, (uint64_t)__copy_to_user_fixup},
+};
+
+/* If `frame` faulted at an address we know how to recover from, redirect
+ * its saved rip to the matching fixup and report success -- iretq then
+ * resumes there instead of at the instruction that faulted. */
+static bool try_fixup(struct interrupt_frame *frame) {
+  for (size_t i = 0; i < ARRAY_LEN(extable); i++) {
+    if (frame->rip == extable[i].fault_ip) {
+      frame->rip = extable[i].fixup_ip;
+      return true;
+    }
+  }
+  return false;
+}
 void isr_common_handler(struct interrupt_frame *frame) {
   uint64_t v = frame->vector;
   if (v >= VEC_IRQ_BASE && v != VEC_SYSCALL && v != VEC_SPURIOUS) {
@@ -100,6 +127,9 @@ void isr_common_handler(struct interrupt_frame *frame) {
   }
 
   if (v < 32) {
+    if (v == 14 && try_fixup(frame)) {
+      return;
+    }
     dump_and_panic(frame);
     return;
   }

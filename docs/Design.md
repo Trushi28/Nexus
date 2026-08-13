@@ -92,6 +92,11 @@ been verified and what's honestly still missing. See the main
   a mount table would dispatch through.
 - The ELF loader only accepts static, non-PIE `ET_EXEC` binaries — no
   dynamic linking, no relocations, no PIE.
+- The NVMe driver is polled (no MSI-X interrupt wiring yet, though
+  drivers/pci.h already has the capability), single-namespace,
+  single-I/O-queue, and caps a single request at ~2MiB (one PRP-list
+  page, not chained). Buffers must be page-aligned. See the comment at
+  the top of drivers/nvme.c for the reasoning.
 
 ## Verification performed here
 

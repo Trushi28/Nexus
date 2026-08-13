@@ -11,6 +11,8 @@
 #include "debug/log.h"
 #include "debug/serial.h"
 #include "drivers/keyboard.h"
+#include "drivers/nvme.h"
+#include "fs/graph.h"
 #include "fs/initrd.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
@@ -35,12 +37,15 @@ static void heartbeat_task(void *arg) {
     sched_sleep_ms(5000);
   }
 }
-
-/* Exercises the whole VFS + ELF loader + ring-3 + syscall pipeline in
- * one shot: spawns /bin/hello, waits for it, and reports pass/fail.
- * Only runs if "selftest" is on the kernel cmdline (see limine.conf's
- * "Nexus (self-test)" entry) -- a quick smoke test after hacking on
- * any of those subsystems, without needing to type at the shell. */
+static void nvme_init_task(void *arg) {
+  (void)arg;
+  if (nvme_init()) {
+    graph_load_from_disk(); /* best-effort -- logs its own outcome,
+                                including the ordinary "nothing saved
+                                yet" case on a fresh disk */
+  }
+  task_exit();
+}
 static void selftest_task(void *arg) {
   (void)arg;
   kprintf("[selftest] spawning /bin/hello ...\n");
@@ -118,6 +123,7 @@ NORETURN void kmain(void) {
    * A missing module just leaves "/" empty; not fatal, since a
    * from-scratch OS is still perfectly usable without a filesystem. */
   vfs_set_root(tmpfs_create_root());
+  graph_init();
   const struct limine_file *initrd = boot_find_module("initrd.tar");
   if (initrd != NULL) {
     initrd_unpack(initrd->address, initrd->size);
@@ -138,6 +144,7 @@ NORETURN void kmain(void) {
   kprintf("[boot] core init complete, starting the scheduler\n\n");
 
   task_create("shell", shell_task, NULL);
+  task_create("nvme", nvme_init_task, NULL);
   if (strstr(g_boot.cmdline, "selftest") != NULL) {
     task_create("selftest", selftest_task, NULL);
   }

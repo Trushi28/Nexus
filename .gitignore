@@ -75,3 +75,4 @@ initrd.tar
 *.swp
 *.swo
 compile_commands.json
+*.img

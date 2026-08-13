@@ -10,9 +10,9 @@
  * vmm_map_mmio()). */
 void lapic_init(void);
 
-bool     lapic_using_x2apic(void);
+bool lapic_using_x2apic(void);
 uint32_t lapic_id(void);
-
+bool lapic_is_ready(void);
 void lapic_send_eoi(void);
 
 void lapic_send_ipi(uint32_t dest_apic_id, uint8_t vector);
