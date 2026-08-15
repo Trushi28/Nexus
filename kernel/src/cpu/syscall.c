@@ -1,10 +1,12 @@
 #include "cpu/syscall.h"
 #include "abi/syscall_nr.h"
+#include "abi/task_info.h"
 #include "cpu/cpu.h"
 #include "cpu/isr.h"
 #include "cpu/usercopy.h"
 #include "cpu/vectors.h"
 #include "debug/log.h"
+#include "debug/serial.h"
 #include "drivers/keyboard.h"
 #include "fs/vfs.h"
 #include "mm/pmm.h"
@@ -12,6 +14,7 @@
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "time/timer.h"
+#include "video/console.h"
 /*
  * The syscall ABI: `int $0x80`, number in rax, args in rdi/rsi/rdx/r10/
  * r8, return value in rax. isr_stubs.S has already pushed every GPR
@@ -115,12 +118,27 @@ static void sys_read_impl(struct interrupt_frame *f) {
     uint64_t n = 0;
     while (n < len) {
       char c = keyboard_getc(); /* blocks -- fine, we're not holding anything */
+
+      if (c == '\b') {
+        if (n > 0) {
+          n--;
+          serial_puts("\b \b");
+          console_backspace();
+        }
+        continue;
+      }
+
       if (copy_to_user((void *)(buf + n), &c, 1) != 0) {
         break;
       }
       n++;
+
       if (c == '\n') {
+        kprintf("\n");
         break;
+      }
+      if (c >= 0x20 && c < 0x7F) {
+        kprintf("%c", c);
       }
     }
     f->rax = n;
@@ -287,6 +305,81 @@ static void sys_readdir_impl(struct interrupt_frame *f) {
   }
   f->rax = 0;
 }
+static void sys_spawn_impl(struct interrupt_frame *f) {
+  uint64_t path_va = f->rdi;
+
+  char path[256];
+  if (!user_range_ok(path_va, 1) ||
+      !copy_string_from_user(path, (const void *)path_va, sizeof(path))) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct task *t = process_spawn(path, path);
+  f->rax = (t != NULL) ? t->id : (uint64_t)-1;
+}
+
+static void sys_wait_impl(struct interrupt_frame *f) {
+  uint64_t pid = f->rdi;
+
+  struct task *child = sched_find_waitable_task(pid);
+  if (child == NULL) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  int code = sched_wait_task(child);
+  f->rax = (uint64_t)(int64_t)code;
+}
+
+struct ps_lookup_ctx {
+  uint32_t target_index;
+  uint32_t seen;
+  bool found;
+  nx_task_info_t info;
+};
+
+static void ps_lookup_one(struct task *t, void *arg) {
+  struct ps_lookup_ctx *ctx = (struct ps_lookup_ctx *)arg;
+  if (ctx->found) {
+    return; /* sched_for_each_task() has no early-exit -- just skip
+                the rest of the walk once we've found our target */
+  }
+  if (ctx->seen == ctx->target_index) {
+    ctx->info.pid = t->id;
+    strncpy(ctx->info.name, t->name, sizeof(ctx->info.name) - 1);
+    ctx->info.name[sizeof(ctx->info.name) - 1] = '\0';
+    ctx->info.state = (uint32_t)t->state;
+    ctx->info.is_user = t->is_user ? 1 : 0;
+    ctx->found = true;
+  }
+  ctx->seen++;
+}
+
+static void sys_ps_impl(struct interrupt_frame *f) {
+  uint32_t index = (uint32_t)f->rdi;
+  uint64_t out_va = f->rsi;
+
+  if (!user_range_ok(out_va, sizeof(nx_task_info_t))) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct ps_lookup_ctx ctx = {.target_index = index, .seen = 0, .found = false};
+  sched_for_each_task(ps_lookup_one, &ctx);
+
+  if (!ctx.found) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  if (copy_to_user((void *)out_va, &ctx.info, sizeof(ctx.info)) != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  f->rax = 0;
+}
+
 static void syscall_dispatch(struct interrupt_frame *f) {
   switch (f->rax) {
   case SYS_exit:
@@ -321,6 +414,15 @@ static void syscall_dispatch(struct interrupt_frame *f) {
     break;
   case SYS_uptime_ms:
     sys_uptime_ms_impl(f);
+    break;
+  case SYS_spawn:
+    sys_spawn_impl(f);
+    break;
+  case SYS_wait:
+    sys_wait_impl(f);
+    break;
+  case SYS_ps:
+    sys_ps_impl(f);
     break;
   default:
     kprintf("[syscall] pid %lu made unknown syscall %lu\n",

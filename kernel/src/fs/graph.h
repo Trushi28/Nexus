@@ -61,6 +61,7 @@ size_t graph_write(struct gnode *n, uint64_t offset, const void *buf,
                    size_t len);
 
 struct gnode *graph_resolve(const char *path);
+struct gnode *graph_touch(const char *path, bool *out_created);
 struct gnode *graph_find_by_id(uint64_t id);
 void graph_for_each_node(void (*fn)(struct gnode *n, void *arg), void *arg);
 
@@ -74,5 +75,5 @@ void sstring_unset(const char *name);
 
 bool graph_save_to_disk(void);
 bool graph_load_from_disk(void);
-
+bool graph_is_dirty(void);
 #endif /* NEXUS_GRAPH_H */

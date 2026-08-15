@@ -4,6 +4,7 @@
 #include "drivers/nvme.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "sched/sched.h"
 #include "sync/spinlock.h"
 
 static spinlock_t graph_lock = SPINLOCK_INIT;
@@ -17,6 +18,29 @@ struct sstring_entry {
   struct gnode *anchor;
 };
 static struct sstring_entry sstrings[SSTRING_MAX_ENTRIES];
+/* ---------------------------- dirty tracking ---------------------------
+ * Plain atomics, not graph_lock -- a single bool needs cross-cpu
+ * visibility, not mutual exclusion with the node/edge data it's
+ * tracking. Set unconditionally by every mutating entry point below;
+ * cleared by a successful save (graph_save_to_disk() clears it BEFORE
+ * taking the snapshot, not after -- see that function for why) or a
+ * successful load (a freshly loaded graph matches disk by
+ * definition, even though the internal graph_link()/sstring_set()/
+ * graph_write() calls deserialize_graph() makes along the way each
+ * set the flag individually). */
+static volatile bool graph_dirty = false;
+
+static void graph_mark_dirty(void) {
+  __atomic_store_n(&graph_dirty, true, __ATOMIC_RELEASE);
+}
+
+static void graph_clear_dirty(void) {
+  __atomic_store_n(&graph_dirty, false, __ATOMIC_RELEASE);
+}
+
+bool graph_is_dirty(void) {
+  return __atomic_load_n(&graph_dirty, __ATOMIC_ACQUIRE);
+}
 
 void graph_init(void) {
   for (uint32_t i = 0; i < SSTRING_MAX_ENTRIES; i++) {
@@ -38,7 +62,7 @@ struct gnode *graph_node_create(const char *label) {
   n->reg_next = registry_head;
   registry_head = n;
   spinlock_release_irqrestore(&graph_lock, f);
-
+  graph_mark_dirty();
   return n;
 }
 
@@ -144,6 +168,7 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
       release_cascade_locked(old_target);
     }
     spinlock_release_irqrestore(&graph_lock, f);
+    graph_mark_dirty();
     return;
   }
   spinlock_release_irqrestore(&graph_lock, f);
@@ -167,6 +192,7 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
     }
     spinlock_release_irqrestore(&graph_lock, f);
     kfree(e);
+    graph_mark_dirty();
     return;
   }
 
@@ -175,6 +201,7 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
   from->edge_count++;
   to->refcount++;
   spinlock_release_irqrestore(&graph_lock, f);
+  graph_mark_dirty();
 }
 
 void graph_unlink(struct gnode *from, const char *edge_name) {
@@ -203,7 +230,7 @@ void graph_unlink(struct gnode *from, const char *edge_name) {
   }
 
   spinlock_release_irqrestore(&graph_lock, f);
-
+  graph_mark_dirty();
   if (freed > 0) {
     kprintf("[graph] unlinked '%s' -- freed %u node(s)\n", edge_name, freed);
   } else {
@@ -224,6 +251,7 @@ void graph_node_delete(struct gnode *n) {
   }
   uint32_t freed = release_cascade_locked(n);
   spinlock_release_irqrestore(&graph_lock, f);
+  graph_mark_dirty();
   kprintf("[graph] freed %u node(s)\n", freed);
 }
 
@@ -244,12 +272,6 @@ void graph_clear_all(void) {
     }
   }
 
-  /* Anything still standing with refcount 0 here was never
-   * referenced by an edge OR an sstring to begin with -- a bare gmk
-   * nobody ever linked anywhere. Snapshot the registry into a
-   * separate worklist first: release_cascade_locked() mutates
-   * registry_head/reg_next out from under a live iterator over the
-   * same list. */
   struct gnode *orphans = NULL;
   for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
     if (n->refcount == 0) {
@@ -271,6 +293,11 @@ void graph_clear_all(void) {
   }
 
   spinlock_release_irqrestore(&graph_lock, f);
+
+  if (freed > 0) {
+    graph_mark_dirty(); /* an already-empty gclear touched nothing --
+                            don't manufacture a save for it */
+  }
 
   if (remaining == 0) {
     kprintf("[graph] cleared -- freed %u node(s)\n", freed);
@@ -358,6 +385,7 @@ size_t graph_write(struct gnode *n, uint64_t offset, const void *buf,
     n->size = end;
   }
   spinlock_release_irqrestore(&graph_lock, f);
+  graph_mark_dirty();
   return len;
 }
 
@@ -397,6 +425,7 @@ bool sstring_set(const char *name, struct gnode *anchor) {
         release_cascade_locked(old_anchor);
       }
       spinlock_release_irqrestore(&graph_lock, f);
+      graph_mark_dirty();
       return true;
     }
   }
@@ -407,6 +436,7 @@ bool sstring_set(const char *name, struct gnode *anchor) {
       sstrings[i].anchor = anchor;
       anchor->refcount++;
       spinlock_release_irqrestore(&graph_lock, f);
+      graph_mark_dirty();
       return true;
     }
   }
@@ -460,6 +490,7 @@ void sstring_unset(const char *name) {
         freed = release_cascade_locked(anchor);
       }
       spinlock_release_irqrestore(&graph_lock, f);
+      graph_mark_dirty();
       if (freed > 0) {
         kprintf("[graph] removed sstring '%s' -- freed %u node(s)\n", name,
                 freed);
@@ -509,6 +540,80 @@ struct gnode *graph_resolve(const char *path) {
     if (cur == NULL) {
       return NULL;
     }
+  }
+  return cur;
+}
+
+struct gnode *graph_touch(const char *path, bool *out_created) {
+  char comps[GRAPH_MAX_DEPTH][GEDGE_NAME_MAX];
+  int depth = 0;
+
+  const char *p = path;
+  while (*p == '/') {
+    p++;
+  }
+  while (*p != '\0' && depth < GRAPH_MAX_DEPTH) {
+    size_t n = 0;
+    while (*p != '\0' && *p != '/') {
+      if (n + 1 < sizeof(comps[0])) {
+        comps[depth][n++] = *p;
+      }
+      p++;
+    }
+    comps[depth][n] = '\0';
+    depth++;
+    while (*p == '/') {
+      p++;
+    }
+  }
+
+  if (out_created != NULL) {
+    *out_created = false;
+  }
+  if (depth == 0) {
+    return NULL;
+  }
+
+  bool created_any = false;
+
+  struct gnode *cur = sstring_get(comps[0]);
+  if (cur == NULL) {
+    cur = graph_node_create(comps[0]);
+    if (cur == NULL) {
+      return NULL;
+    }
+    if (!sstring_set(comps[0], cur)) {
+      /* Table full -- the node exists but has no anchor pointing at
+       * it, same situation as a bare gmk nobody ever linked
+       * anywhere. Not worse than before this function existed; just
+       * not the happy path, and worth surfacing since it's
+       * surprising for what's supposed to be a one-shot
+       * create-and-reach-it call. */
+      kprintf("[graph] gtouch: sstring table full -- '%s' created (#%lu) "
+              "but not anchored\n",
+              comps[0], cur->id);
+    }
+    created_any = true;
+  }
+
+  for (int i = 1; i < depth; i++) {
+    struct gnode *next = graph_edge_lookup(cur, comps[i]);
+    if (next == NULL) {
+      next = graph_node_create(comps[i]);
+      if (next == NULL) {
+        if (out_created != NULL) {
+          *out_created = created_any;
+        }
+        return NULL;
+      }
+      graph_link(cur, comps[i], next);
+      created_any = true;
+    }
+    cur = next;
+  }
+
+  if (out_created != NULL) {
+    *out_created = created_any;
   }
   return cur;
 }
@@ -752,17 +857,70 @@ static bool deserialize_graph(const uint8_t *buf, size_t len) {
   return true;
 }
 
+/* ------------------------------ disk gate -------------------------------
+ * Serializes graph_save_to_disk()/graph_load_from_disk() against each
+ * other. graph_lock isn't enough here -- that only covers the brief
+ * in-memory critical section; this has to span an actual NVMe
+ * round-trip (nvme_read()/nvme_write() -> submit_and_wait() ->
+ * task_block()), which SLEEPS. Can't be a spinlock: holding one
+ * across a blocking call leaves interrupts off on this cpu for as
+ * long as the disk takes to answer.
+ *
+ * Before the autosave task existed, every caller here was serialized
+ * by pure circumstance -- gsync/gload/reboot-save are all shell
+ * commands, and there's only ever one shell task. drivers/nvme.c's
+ * submit_and_wait() has NO locking of its own: struct
+ * nvme_queue::irq_wq is a single-slot wait_queue, so two overlapping
+ * callers means the second's wait_queue_register() silently
+ * overwrites the first's, and the first never gets woken -- a
+ * permanent task hang, not a graceful failure. The autosave task is
+ * the first thing able to race a shell-driven save/load, so this is
+ * load-bearing now, not defensive.
+ *
+ * A CAS-spin-and-yield rather than a real sleeping mutex: exactly two
+ * possible contenders (the shell task, the autosave task), and this
+ * kernel doesn't have a blocking mutex primitive yet -- not worth
+ * building one for a race this narrow. */
+static volatile bool disk_op_busy = false;
+
+static void disk_op_lock(void) {
+  for (;;) {
+    bool expected = false;
+    if (__atomic_compare_exchange_n(&disk_op_busy, &expected, true, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      return;
+    }
+    sched_sleep_ms(5);
+  }
+}
+
+static void disk_op_unlock(void) {
+  __atomic_store_n(&disk_op_busy, false, __ATOMIC_RELEASE);
+}
+
 bool graph_save_to_disk(void) {
   if (!nvme_available()) {
     kprintf("[graph] no NVMe controller available -- can't save\n");
     return false;
   }
 
+  disk_op_lock();
+
+  /* Clear dirty BEFORE the snapshot, not after writing it to disk. A
+   * mutation landing after this point just re-sets the flag (every
+   * mutator does so unconditionally), so the worst case is one extra
+   * autosave cycle later. Clearing after the write instead could
+   * silently lose exactly that mutation: the snapshot already on
+   * disk wouldn't have it, but the flag would say "clean" anyway. */
+  graph_clear_dirty();
+
   uint64_t buf_pages = DIV_ROUND_UP(GRAPH_SNAPSHOT_MAX_BYTES, PAGE_SIZE);
   uint64_t payload_phys = pmm_alloc_pages(buf_pages);
   if (payload_phys == 0) {
     kprintf("[graph] out of memory allocating a %lu-page snapshot buffer\n",
             buf_pages);
+    graph_mark_dirty();
+    disk_op_unlock();
     return false;
   }
   uint8_t *payload_buf = (uint8_t *)phys_to_virt(payload_phys);
@@ -780,6 +938,8 @@ bool graph_save_to_disk(void) {
         "[graph] graph too large to snapshot (needs %lu bytes, v1 cap is %u)\n",
         (uint64_t)sink.written, (unsigned)GRAPH_SNAPSHOT_MAX_BYTES);
     pmm_free_pages(payload_phys, buf_pages);
+    graph_mark_dirty();
+    disk_op_unlock();
     return false;
   }
 
@@ -791,6 +951,8 @@ bool graph_save_to_disk(void) {
   if (sb_phys == 0) {
     kprintf("[graph] out of memory allocating the superblock buffer\n");
     pmm_free_pages(payload_phys, buf_pages);
+    graph_mark_dirty();
+    disk_op_unlock();
     return false;
   }
   struct graph_disk_superblock *sb =
@@ -807,9 +969,11 @@ bool graph_save_to_disk(void) {
 
   pmm_free_pages(payload_phys, buf_pages);
   pmm_free_page(sb_phys);
+  disk_op_unlock();
 
   if (!ok) {
     kprintf("[graph] NVMe write failed while saving\n");
+    graph_mark_dirty();
     return false;
   }
 
@@ -829,9 +993,12 @@ bool graph_load_from_disk(void) {
     return false;
   }
 
+  disk_op_lock();
+
   uint64_t sb_phys = pmm_alloc_page();
   if (sb_phys == 0) {
     kprintf("[graph] out of memory allocating the superblock buffer\n");
+    disk_op_unlock();
     return false;
   }
   struct graph_disk_superblock *sb =
@@ -840,12 +1007,14 @@ bool graph_load_from_disk(void) {
   if (!nvme_read(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb)) {
     kprintf("[graph] failed reading the superblock\n");
     pmm_free_page(sb_phys);
+    disk_op_unlock();
     return false;
   }
 
   if (memcmp(sb->magic, "NEXUSGFS", 8) != 0) {
     kprintf("[graph] no saved graph found -- starting empty\n");
     pmm_free_page(sb_phys);
+    disk_op_unlock();
     return false;
   }
   if (sb->version != GRAPH_DISK_VERSION) {
@@ -853,6 +1022,7 @@ bool graph_load_from_disk(void) {
             "%u -- skipping\n",
             sb->version, (unsigned)GRAPH_DISK_VERSION);
     pmm_free_page(sb_phys);
+    disk_op_unlock();
     return false;
   }
   if (sb->payload_bytes > GRAPH_SNAPSHOT_MAX_BYTES) {
@@ -860,6 +1030,7 @@ bool graph_load_from_disk(void) {
             "kernel's %u-byte cap -- refusing\n",
             sb->payload_bytes, (unsigned)GRAPH_SNAPSHOT_MAX_BYTES);
     pmm_free_page(sb_phys);
+    disk_op_unlock();
     return false;
   }
 
@@ -877,6 +1048,7 @@ bool graph_load_from_disk(void) {
   if (payload_phys == 0) {
     kprintf("[graph] out of memory allocating a %lu-page load buffer\n",
             buf_pages);
+    disk_op_unlock();
     return false;
   }
   uint8_t *payload_buf = (uint8_t *)phys_to_virt(payload_phys);
@@ -884,6 +1056,7 @@ bool graph_load_from_disk(void) {
   if (!nvme_read(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf)) {
     kprintf("[graph] failed reading the saved graph payload\n");
     pmm_free_pages(payload_phys, buf_pages);
+    disk_op_unlock();
     return false;
   }
 
@@ -891,11 +1064,14 @@ bool graph_load_from_disk(void) {
     kprintf("[graph] saved graph failed its checksum (corrupt or "
             "partially written) -- refusing to load it\n");
     pmm_free_pages(payload_phys, buf_pages);
+    disk_op_unlock();
     return false;
   }
 
   bool ok = deserialize_graph(payload_buf, (size_t)payload_bytes);
   pmm_free_pages(payload_phys, buf_pages);
+  disk_op_unlock(); /* deserialize_graph() is over; nothing past this
+                        point touches the disk */
 
   if (!ok) {
     kprintf("[graph] load failed partway through -- graph may be "
@@ -906,6 +1082,8 @@ bool graph_load_from_disk(void) {
   uint64_t f = spinlock_acquire_irqsave(&graph_lock);
   next_node_id = saved_next_id;
   spinlock_release_irqrestore(&graph_lock, f);
+
+  graph_clear_dirty();
 
   kprintf("[graph] loaded saved graph (%lu byte(s) payload)\n", payload_bytes);
   return true;

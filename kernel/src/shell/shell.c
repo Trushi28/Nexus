@@ -117,6 +117,7 @@ static void cmd_reboot(const char *args);
 static void cmd_aliases(const char *args);
 static void cmd_topcmds(const char *args);
 static void cmd_gmk(const char *args);
+static void cmd_gtouch(const char *args);
 static void cmd_sstring_set(const char *args);
 static void cmd_sstrings(const char *args);
 static void cmd_glink(const char *args);
@@ -154,7 +155,7 @@ static const struct shell_synonym synonyms[] = {
     {"new", "gmk"},          {"write", "gwrite"}, {"info", "gnodeinfo"},
     {"save", "gsync"},       {"load", "gload"},   {"rm", "grm"},
     {"del", "grm"},          {"delete", "grm"},   {"unlink", "gunlink"},
-    {"wipe", "gclear"},
+    {"wipe", "gclear"},      {"touch", "gtouch"},
 };
 
 static const char *normalize_verb(const char *verb, char *scratch,
@@ -185,14 +186,18 @@ static struct shell_command commands[] = {
     {"cat", cmd_cat, "<path>", "print a file's contents", NULL, 0},
     {"run", cmd_run, "<path>", "load and run an ELF binary in ring 3", NULL, 0},
     {"matrix", cmd_matrix, "", "you know the one -- any key to stop", NULL, 0},
-    {"reboot", cmd_reboot, "", "reset the machine (8042 controller pulse)",
-     NULL, 0},
+    {"reboot", cmd_reboot, "",
+     "save if dirty,then reset the machine (8042 controller pulse)", NULL, 0},
     {"aliases", cmd_aliases, "", "list command shortcuts (list==ls, etc)", NULL,
      0},
     {"topcmds", cmd_topcmds, "", "your most-used commands, most frecent first",
      NULL, 0},
 
     {"gmk", cmd_gmk, "[label]", "create a new, unlinked graph node",
+     "Graph FS (experimental)", 0},
+    {"gtouch", cmd_gtouch, "<path>",
+     "create (or reach) a node at a path -- auto-creates every "
+     "missing anchor/edge along the way",
      "Graph FS (experimental)", 0},
     {"sstring", cmd_sstring_set, "<name> <ref>",
      "point a named anchor at a node (ref: id or path)",
@@ -702,6 +707,13 @@ static void cmd_matrix(const char *args) {
 
 static void cmd_reboot(const char *args) {
   (void)args;
+  if (graph_is_dirty()) {
+    kprintf("graph has unsaved changes -- saving before reboot...\n");
+    graph_save_to_disk(); /* logs its own outcome; a failed save still
+                              falls through to reboot -- refusing to
+                              reboot over a save failure would be
+                              worse */
+  }
   kprintf("rebooting...\n");
   timer_busy_wait_ms(50);
   uint8_t status;
@@ -762,6 +774,22 @@ static void cmd_gmk(const char *args) {
     return;
   }
   kprintf("created node #%lu%s%s\n", n->id, *args ? " " : "", args);
+}
+
+static void cmd_gtouch(const char *args) {
+  if (*args == '\0') {
+    kprintf("usage: gtouch <path>\n");
+    return;
+  }
+  bool created;
+  struct gnode *n = graph_touch(args, &created);
+  if (n == NULL) {
+    kprintf("gtouch: couldn't create '%s' (empty path, or out of memory)\n",
+            args);
+    return;
+  }
+  kprintf("%s -> #%lu%s\n", args, n->id,
+          created ? " (created)" : " (already existed)");
 }
 
 static void cmd_sstring_set(const char *args) {
@@ -892,17 +920,22 @@ static void cmd_gwrite(const char *args) {
   p = skip_spaces(p);
 
   if (ref[0] == '\0' || *p == '\0') {
-    kprintf("usage: gwrite <node-ref> <text>\n");
+    kprintf("usage: gwrite <node-ref-or-path> <text>\n");
     return;
   }
   struct gnode *n = resolve_ref(ref);
+  bool auto_created = false;
   if (n == NULL) {
-    kprintf("gwrite: no such node '%s'\n", ref);
+    n = graph_touch(ref, &auto_created);
+  }
+  if (n == NULL) {
+    kprintf("gwrite: no such node '%s' and couldn't create it\n", ref);
     return;
   }
   size_t len = strlen(p);
   graph_write(n, 0, p, len);
-  kprintf("wrote %lu byte(s) to #%lu\n", (uint64_t)len, n->id);
+  kprintf("wrote %lu byte(s) to #%lu%s\n", (uint64_t)len, n->id,
+          auto_created ? " (path auto-created)" : "");
 }
 
 static void cmd_gnodeinfo(const char *args) {

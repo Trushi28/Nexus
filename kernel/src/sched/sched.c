@@ -88,6 +88,21 @@ static void unregister_task(struct task *t) {
   spinlock_release_irqrestore(&registry_lock, f);
 }
 
+struct task *sched_find_waitable_task(uint64_t id) {
+  uint64_t f = spinlock_acquire_irqsave(&registry_lock);
+  struct task *result = NULL;
+  for (struct task *t = registry_head; t != NULL; t = t->reg_next) {
+    if (t->id == id) {
+      if (t->waitable) {
+        result = t;
+      }
+      break;
+    }
+  }
+  spinlock_release_irqrestore(&registry_lock, f);
+  return result;
+}
+
 void sched_for_each_task(void (*fn)(struct task *t, void *arg), void *arg) {
   uint64_t f = spinlock_acquire_irqsave(&registry_lock);
   for (struct task *t = registry_head; t != NULL; t = t->reg_next) {
@@ -497,16 +512,33 @@ NORETURN void task_exit(void) {
 
 int sched_wait_task(struct task *child) {
   uint64_t f = spinlock_acquire_irqsave(&wait_lock);
+
+  if (child->reaped) {
+    spinlock_release_irqrestore(&wait_lock, f);
+    return -1;
+  }
+
   if (child->state != TASK_DEAD) {
+    if (child->waiting_parent != NULL) {
+      spinlock_release_irqrestore(&wait_lock, f);
+      return -1;
+    }
     struct task *me = this_cpu()->current_task;
     me->switched_away = false;
     child->waiting_parent = me;
     me->state = TASK_BLOCKED;
     spinlock_release_irqrestore(&wait_lock, f);
     schedule();
-  } else {
-    spinlock_release_irqrestore(&wait_lock, f);
+
+    f = spinlock_acquire_irqsave(&wait_lock);
+    if (child->reaped) {
+      spinlock_release_irqrestore(&wait_lock, f);
+      return -1;
+    }
   }
+
+  child->reaped = true;
+  spinlock_release_irqrestore(&wait_lock, f);
 
   int code = child->exit_code;
   unregister_task(child);

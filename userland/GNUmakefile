@@ -18,12 +18,12 @@ CFLAGS := -Wall -Wextra -std=gnu11 -O2 \
 
 LDFLAGS := -m elf_x86_64 -static -no-pie -T user.ld
 
-PROGRAMS := hello sysinfo guess
+PROGRAMS := hello sysinfo guess nsh
 
 .PHONY: all
 all: $(addprefix bin/,$(PROGRAMS))
 
-bin/%: %.c crt0.S ulib.c ulib.h syscall.h include/syscall_nr.h user.ld
+bin/%: %.c crt0.S ulib.c ulib.h syscall.h include/syscall_nr.h include/task_info.h user.ld
 	@mkdir -p bin obj
 	$(CC) $(CFLAGS) -c crt0.S -o obj/crt0.o
 	$(CC) $(CFLAGS) -c ulib.c -o obj/ulib.o

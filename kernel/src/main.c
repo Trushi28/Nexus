@@ -28,6 +28,7 @@
 #include "time/timer.h"
 #include "video/console.h"
 #include "video/fb.h"
+#define GRAPH_AUTOSAVE_INTERVAL_MS (30 * 1000)
 
 static void heartbeat_task(void *arg) {
   const char *name = (const char *)arg;
@@ -35,6 +36,17 @@ static void heartbeat_task(void *arg) {
     kprintf("[%s] cpu%u alive, uptime %lu ms, %u task(s) live\n", name,
             this_cpu()->cpu_index, timer_uptime_ms(), sched_task_count());
     sched_sleep_ms(5000);
+  }
+}
+
+static void graph_autosave_task(void *arg) {
+  (void)arg;
+  for (;;) {
+    sched_sleep_ms(GRAPH_AUTOSAVE_INTERVAL_MS);
+    if (graph_is_dirty()) {
+      graph_save_to_disk(); /* logs its own outcome; a failure leaves
+                                dirty set, so the next cycle retries */
+    }
   }
 }
 static void nvme_init_task(void *arg) {
@@ -145,6 +157,7 @@ NORETURN void kmain(void) {
 
   task_create("shell", shell_task, NULL);
   task_create("nvme", nvme_init_task, NULL);
+  task_create("gautosave", graph_autosave_task, NULL);
   if (strstr(g_boot.cmdline, "selftest") != NULL) {
     task_create("selftest", selftest_task, NULL);
   }
