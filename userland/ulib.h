@@ -44,6 +44,7 @@ int u_wait(int pid);           /* -> exit code, or -1 */
  * preexisting gap, not something this feature touches). */
 int u_open(const char *path, int flags);
 int u_read(int fd, void *buf, size_t len);
+int u_write(int fd, const void *buf, size_t len);
 int u_close(int fd);
 bool u_readdir(const char *path, unsigned index, char *name_out,
                size_t name_max);

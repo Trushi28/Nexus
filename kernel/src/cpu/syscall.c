@@ -172,6 +172,7 @@ static void sys_read_impl(struct interrupt_frame *f) {
 
 static void sys_open_impl(struct interrupt_frame *f) {
   uint64_t path_va = f->rdi;
+  int flags = (int)f->rsi;
 
   char path[256];
   if (!user_range_ok(path_va, 1) ||
@@ -193,8 +194,10 @@ static void sys_open_impl(struct interrupt_frame *f) {
     return;
   }
 
+  bool create = (flags & O_CREAT) != 0;
+
   struct vfs_file *file;
-  if (!vfs_open(path, &file)) {
+  if (!vfs_open(path, create, &file)) {
     f->rax = (uint64_t)-1;
     return;
   }
@@ -202,6 +205,7 @@ static void sys_open_impl(struct interrupt_frame *f) {
   t->fds[slot] = file;
   f->rax = (uint64_t)slot;
 }
+
 static void sys_close_impl(struct interrupt_frame *f) {
   int fd = (int)f->rdi;
   struct task *t = this_cpu()->current_task;

@@ -103,6 +103,10 @@ int u_read(int fd, void *buf, size_t len) {
   return (int)SC3(SYS_read, fd, buf, len);
 }
 
+int u_write(int fd, const void *buf, size_t len) {
+  return (int)SC3(SYS_write, fd, buf, len);
+}
+
 int u_close(int fd) { return (int)SC1(SYS_close, fd); }
 
 bool u_readdir(const char *path, unsigned index, char *name_out,

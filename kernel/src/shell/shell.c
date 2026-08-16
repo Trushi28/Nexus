@@ -707,7 +707,7 @@ static void cmd_cat(const char *args) {
     return;
   }
   struct vfs_file *f;
-  if (!vfs_open(args, &f)) {
+  if (!vfs_open(args, false, &f)) {
     kprintf("cat: %s: no such file\n", args);
     return;
   }

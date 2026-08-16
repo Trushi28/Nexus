@@ -133,7 +133,7 @@ kernel: kernel/.deps-obtained
 userland:
 	$(MAKE) -C userland
 
-INITRD_PROGRAMS := hello sysinfo guess nsh
+INITRD_PROGRAMS := hello sysinfo guess nsh mkfile
 
 # A plain ustar archive of userland/bin/* under /bin -- unpacked into
 # tmpfs at boot by fs/initrd.c. `--format=ustar` is load-bearing: GNU

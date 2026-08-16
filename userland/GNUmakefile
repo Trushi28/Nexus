@@ -18,7 +18,7 @@ CFLAGS := -Wall -Wextra -std=gnu11 -O2 \
 
 LDFLAGS := -m elf_x86_64 -static -no-pie -T user.ld
 
-PROGRAMS := hello sysinfo guess nsh
+PROGRAMS := hello sysinfo guess nsh mkfile
 
 .PHONY: all
 all: $(addprefix bin/,$(PROGRAMS))

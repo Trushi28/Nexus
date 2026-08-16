@@ -14,48 +14,51 @@
  */
 
 enum vnode_type {
-    VNODE_FILE,
-    VNODE_DIR,
+  VNODE_FILE,
+  VNODE_DIR,
 };
 
 struct vnode;
 
 struct vnode_ops {
-    /* Reads up to `len` bytes starting at `offset` into `buf`. Returns
-     * the number of bytes actually read (0 at EOF). */
-    size_t (*read)(struct vnode *node, uint64_t offset, void *buf, size_t len);
+  /* Reads up to `len` bytes starting at `offset` into `buf`. Returns
+   * the number of bytes actually read (0 at EOF). */
+  size_t (*read)(struct vnode *node, uint64_t offset, void *buf, size_t len);
 
-    /* Writes `len` bytes at `offset`, growing the file if `offset+len`
-     * reaches past the current end. Returns the number of bytes
-     * actually written (less than `len` only on OOM). */
-    size_t (*write)(struct vnode *node, uint64_t offset, const void *buf, size_t len);
+  /* Writes `len` bytes at `offset`, growing the file if `offset+len`
+   * reaches past the current end. Returns the number of bytes
+   * actually written (less than `len` only on OOM). */
+  size_t (*write)(struct vnode *node, uint64_t offset, const void *buf,
+                  size_t len);
 
-    /* Returns the child named `name` inside a directory node, or NULL
-     * if there isn't one. */
-    struct vnode *(*lookup)(struct vnode *dir, const char *name);
+  /* Returns the child named `name` inside a directory node, or NULL
+   * if there isn't one. */
+  struct vnode *(*lookup)(struct vnode *dir, const char *name);
 
-    /* Creates and returns a new child of the given type inside a
-     * directory node, or NULL (already exists, OOM, ...). */
-    struct vnode *(*create)(struct vnode *dir, const char *name, enum vnode_type type);
+  /* Creates and returns a new child of the given type inside a
+   * directory node, or NULL (already exists, OOM, ...). */
+  struct vnode *(*create)(struct vnode *dir, const char *name,
+                          enum vnode_type type);
 
-    /* Fills `name_out` (a caller buffer of `name_max` bytes) with the
-     * name of the `index`'th child of a directory node, in whatever
-     * order the filesystem happens to keep them. Returns false once
-     * `index` is past the last child. */
-    bool (*readdir)(struct vnode *dir, uint32_t index, char *name_out, size_t name_max);
+  /* Fills `name_out` (a caller buffer of `name_max` bytes) with the
+   * name of the `index`'th child of a directory node, in whatever
+   * order the filesystem happens to keep them. Returns false once
+   * `index` is past the last child. */
+  bool (*readdir)(struct vnode *dir, uint32_t index, char *name_out,
+                  size_t name_max);
 };
 
 struct vnode {
-    enum vnode_type type;
-    char name[64];
-    uint64_t size;               /* VNODE_FILE only; 0 for directories */
-    const struct vnode_ops *ops;
-    void *fs_data;                /* filesystem-private node */
+  enum vnode_type type;
+  char name[64];
+  uint64_t size; /* VNODE_FILE only; 0 for directories */
+  const struct vnode_ops *ops;
+  void *fs_data; /* filesystem-private node */
 };
 
 struct vfs_file {
-    struct vnode *node;
-    uint64_t offset;
+  struct vnode *node;
+  uint64_t offset;
 };
 
 /* Installs `root` as the single mounted root ("/"). Call once at boot
@@ -74,15 +77,16 @@ struct vnode *vfs_lookup_path(const char *path);
  * `type`. The "mkdir -p" primitive the initrd unpacker uses. */
 struct vnode *vfs_lookup_or_create(const char *path, enum vnode_type type);
 
-bool     vfs_open(const char *path, struct vfs_file **out);
-void     vfs_close(struct vfs_file *f);
-size_t   vfs_read(struct vfs_file *f, void *buf, size_t len);
-size_t   vfs_write(struct vfs_file *f, const void *buf, size_t len);
+bool vfs_open(const char *path, bool create, struct vfs_file **out);
+void vfs_close(struct vfs_file *f);
+size_t vfs_read(struct vfs_file *f, void *buf, size_t len);
+size_t vfs_write(struct vfs_file *f, const void *buf, size_t len);
 uint64_t vfs_file_size(struct vfs_file *f);
 
 /* Lists directory `path`'s `index`'th entry into `name_out` (a buffer
  * of `name_max` bytes). Returns false once `index` is past the last
  * entry (or `path` doesn't resolve to a directory at all). */
-bool vfs_readdir(const char *path, uint32_t index, char *name_out, size_t name_max);
+bool vfs_readdir(const char *path, uint32_t index, char *name_out,
+                 size_t name_max);
 
 #endif /* NEXUS_VFS_H */
