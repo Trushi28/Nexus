@@ -111,6 +111,21 @@ bool u_readdir(const char *path, unsigned index, char *name_out,
   return r == 0;
 }
 
+int u_kill(int pid) { return (int)SC1(SYS_kill, pid); }
+
+bool u_find_task(int pid, nx_task_info_t *out) {
+  unsigned idx = 0;
+  nx_task_info_t info;
+  while (u_ps(idx, &info)) {
+    if ((int)info.pid == pid) {
+      *out = info;
+      return true;
+    }
+    idx++;
+  }
+  return false;
+}
+
 bool u_ps(unsigned index, nx_task_info_t *out) {
   long r = SC2(SYS_ps, index, out);
   return r == 0;

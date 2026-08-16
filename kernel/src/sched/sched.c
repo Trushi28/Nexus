@@ -103,6 +103,14 @@ struct task *sched_find_waitable_task(uint64_t id) {
   return result;
 }
 
+bool sched_task_is_dead(struct task *t) {
+  return __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == TASK_DEAD;
+}
+
+void sched_kill_task(struct task *t) {
+  __atomic_store_n(&t->kill_requested, true, __ATOMIC_RELEASE);
+}
+
 void sched_for_each_task(void (*fn)(struct task *t, void *arg), void *arg) {
   uint64_t f = spinlock_acquire_irqsave(&registry_lock);
   for (struct task *t = registry_head; t != NULL; t = t->reg_next) {
@@ -476,7 +484,16 @@ void sched_sleep_ms(uint32_t ms) {
 void wait_queue_register(struct wait_queue *wq) {
   struct task *t = this_cpu()->current_task;
   t->switched_away = false;
-  __atomic_store_n(&wq->waiter, t, __ATOMIC_RELEASE);
+  t->wq_next = NULL;
+
+  uint64_t f = spinlock_acquire_irqsave(&wq->lock);
+  if (wq->waiters_tail != NULL) {
+    wq->waiters_tail->wq_next = t;
+  } else {
+    wq->waiters_head = t;
+  }
+  wq->waiters_tail = t;
+  spinlock_release_irqrestore(&wq->lock, f);
 }
 
 void task_block(void) {
@@ -497,12 +514,21 @@ void wait_queue_block(struct wait_queue *wq) {
 }
 
 void wait_queue_wake(struct wait_queue *wq) {
-  struct task *t = __atomic_exchange_n(&wq->waiter, NULL, __ATOMIC_ACQ_REL);
+  uint64_t f = spinlock_acquire_irqsave(&wq->lock);
+  struct task *t = wq->waiters_head;
+  if (t != NULL) {
+    wq->waiters_head = t->wq_next;
+    if (wq->waiters_head == NULL) {
+      wq->waiters_tail = NULL;
+    }
+    t->wq_next = NULL;
+  }
+  spinlock_release_irqrestore(&wq->lock, f);
+
   if (t != NULL) {
     wake_blocked_task(t);
   }
 }
-
 NORETURN void task_exit(void) {
   struct task *t = this_cpu()->current_task;
   t->state = TASK_EXITING;
@@ -512,12 +538,10 @@ NORETURN void task_exit(void) {
 
 int sched_wait_task(struct task *child) {
   uint64_t f = spinlock_acquire_irqsave(&wait_lock);
-
   if (child->reaped) {
     spinlock_release_irqrestore(&wait_lock, f);
     return -1;
   }
-
   if (child->state != TASK_DEAD) {
     if (child->waiting_parent != NULL) {
       spinlock_release_irqrestore(&wait_lock, f);
@@ -529,14 +553,12 @@ int sched_wait_task(struct task *child) {
     me->state = TASK_BLOCKED;
     spinlock_release_irqrestore(&wait_lock, f);
     schedule();
-
     f = spinlock_acquire_irqsave(&wait_lock);
     if (child->reaped) {
       spinlock_release_irqrestore(&wait_lock, f);
       return -1;
     }
   }
-
   child->reaped = true;
   spinlock_release_irqrestore(&wait_lock, f);
 
@@ -558,7 +580,6 @@ int sched_wait_task(struct task *child) {
   __atomic_fetch_sub(&live_task_count, 1, __ATOMIC_RELAXED);
   return code;
 }
-
 uint32_t sched_task_count(void) {
   return __atomic_load_n(&live_task_count, __ATOMIC_RELAXED);
 }

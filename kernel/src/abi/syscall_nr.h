@@ -29,7 +29,8 @@
 #define SYS_spawn 11 // spawn(path)                                 -> pid, or -1
 #define SYS_wait 12 // wait(pid)                                    -> exit code, or -1
 #define SYS_ps 13 // ps(index, nx_task_info_t *out)                 -> 0, or -1 at EOF
-#define SYS_COUNT 14
+#define SYS_kill 14
+#define SYS_COUNT 15
 
 /* open() flags -- deliberately tiny; no O_APPEND/O_TRUNC/etc yet. */
 #define O_RDONLY 0x0

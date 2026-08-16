@@ -147,7 +147,9 @@ static bool queue_init(struct nvme_queue *q, uint16_t depth, uint16_t qid) {
   q->cq_head = 0;
   q->phase = true;
   q->next_cid = 0;
-  q->irq_wq.waiter = NULL;
+  q->irq_wq.waiters_head = NULL;
+  q->irq_wq.waiters_tail = NULL;
+  spinlock_init(&q->irq_wq.lock);
 
   uint64_t sq_pages = DIV_ROUND_UP((uint64_t)depth * NVME_SQE_SIZE, PAGE_SIZE);
   uint64_t cq_pages = DIV_ROUND_UP((uint64_t)depth * NVME_CQE_SIZE, PAGE_SIZE);

@@ -2,6 +2,7 @@
 #define NEXUS_SCHED_H
 
 #include "klib/klib.h"
+#include "sync/spinlock.h"
 
 enum task_state {
   TASK_READY,
@@ -42,11 +43,16 @@ struct task {
   struct task *waiting_parent;
   bool reaped;
   volatile bool switched_away;
+  volatile bool kill_requested;
   struct task *next;
+  struct task *wq_next;
   struct task *reg_next;
 };
+
 struct wait_queue {
-  struct task *waiter;
+  struct task *waiters_head;
+  struct task *waiters_tail;
+  spinlock_t lock;
 };
 
 void sched_init(void);
@@ -57,7 +63,11 @@ struct task *task_create_user(const char *name, uint64_t cr3_phys,
                               uint64_t entry, uint64_t user_stack_top);
 
 int sched_wait_task(struct task *child);
+
 struct task *sched_find_waitable_task(uint64_t id);
+bool sched_task_is_dead(struct task *t);
+void sched_kill_task(struct task *t);
+
 void sched_for_each_task(void (*fn)(struct task *t, void *arg), void *arg);
 
 NORETURN void sched_enter_idle(void);

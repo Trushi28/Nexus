@@ -332,6 +332,18 @@ static void sys_wait_impl(struct interrupt_frame *f) {
   f->rax = (uint64_t)(int64_t)code;
 }
 
+static void sys_kill_impl(struct interrupt_frame *f) {
+  uint64_t pid = f->rdi;
+
+  struct task *t = sched_find_waitable_task(pid);
+  if (t == NULL) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  sched_kill_task(t);
+  f->rax = 0;
+}
+
 struct ps_lookup_ctx {
   uint32_t target_index;
   uint32_t seen;
@@ -381,6 +393,11 @@ static void sys_ps_impl(struct interrupt_frame *f) {
 }
 
 static void syscall_dispatch(struct interrupt_frame *f) {
+  struct task *self = this_cpu()->current_task;
+  if (__atomic_load_n(&self->kill_requested, __ATOMIC_ACQUIRE)) {
+    self->exit_code = 137;
+    task_exit(); /* never returns */
+  }
   switch (f->rax) {
   case SYS_exit:
     sys_exit_impl(f);
@@ -423,6 +440,9 @@ static void syscall_dispatch(struct interrupt_frame *f) {
     break;
   case SYS_ps:
     sys_ps_impl(f);
+    break;
+  case SYS_kill:
+    sys_kill_impl(f);
     break;
   default:
     kprintf("[syscall] pid %lu made unknown syscall %lu\n",

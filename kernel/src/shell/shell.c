@@ -112,6 +112,8 @@ static void cmd_nvmeinfo(const char *args);
 static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
 static void cmd_run(const char *args);
+static void cmd_jobs(const char *args);
+static void cmd_kill(const char *args);
 static void cmd_matrix(const char *args);
 static void cmd_reboot(const char *args);
 static void cmd_aliases(const char *args);
@@ -132,6 +134,7 @@ static void cmd_grm(const char *args);
 static void cmd_gunlink(const char *args);
 static void cmd_sstringrm(const char *args);
 static void cmd_gclear(const char *args);
+static void cmd_ggc(const char *args);
 
 /* ------------------------------- synonyms --------------------------------
  * Non-POSIX by design: several spellings of the same idea execute
@@ -155,7 +158,7 @@ static const struct shell_synonym synonyms[] = {
     {"new", "gmk"},          {"write", "gwrite"}, {"info", "gnodeinfo"},
     {"save", "gsync"},       {"load", "gload"},   {"rm", "grm"},
     {"del", "grm"},          {"delete", "grm"},   {"unlink", "gunlink"},
-    {"wipe", "gclear"},      {"touch", "gtouch"},
+    {"wipe", "gclear"},      {"touch", "gtouch"}, {"gc", "ggc"},
 };
 
 static const char *normalize_verb(const char *verb, char *scratch,
@@ -184,7 +187,13 @@ static struct shell_command commands[] = {
      "NVMe namespace 1 info (if a controller was found)", NULL, 0},
     {"ls", cmd_ls, "[path]", "list a directory (default: /)", NULL, 0},
     {"cat", cmd_cat, "<path>", "print a file's contents", NULL, 0},
-    {"run", cmd_run, "<path>", "load and run an ELF binary in ring 3", NULL, 0},
+    {"run", cmd_run, "<path> [&]",
+     "load and run an ELF binary in ring 3 (append & to background it)", NULL,
+     0},
+    {"jobs", cmd_jobs, "", "list background jobs spawned with 'run ... &'",
+     NULL, 0},
+    {"kill", cmd_kill, "<pid>",
+     "signal a ring-3 task to exit at its next syscall", NULL, 0},
     {"matrix", cmd_matrix, "", "you know the one -- any key to stop", NULL, 0},
     {"reboot", cmd_reboot, "",
      "save if dirty,then reset the machine (8042 controller pulse)", NULL, 0},
@@ -229,6 +238,10 @@ static struct shell_command commands[] = {
      "Graph FS (experimental)", 0},
     {"sstringrm", cmd_sstringrm, "<name>",
      "remove an sstring anchor (frees it if now unreferenced)",
+     "Graph FS (experimental)", 0},
+    {"ggc", cmd_ggc, "",
+     "collect reference cycles unreachable from any anchor "
+     "(mark-and-sweep)",
      "Graph FS (experimental)", 0},
     {"gclear", cmd_gclear, "",
      "wipe the entire graph (frees everything reachable)",
@@ -473,6 +486,80 @@ static struct gnode *resolve_ref(const char *ref) {
   return graph_resolve(ref);
 }
 
+/* ------------------------------ background jobs --------------------------
+ * A small, fixed-size table of jobs started via `run <path> &`.
+ * Deliberately shell-owned, not scheduler-owned: struct task doesn't
+ * know or care whether something is "backgrounded" -- that's purely
+ * bookkeeping this file maintains so `jobs`/`kill` have something to
+ * list/target, and so a finished background job eventually gets
+ * sched_wait_task()'d (freeing its kernel stack, struct task, and its
+ * whole address space) by SOMEONE, since nothing else will. Reaped
+ * lazily, once per prompt (see shell_task()'s loop) rather than by a
+ * dedicated background task -- keeps this table single-threaded/
+ * lock-free, at the cost of a finished job sitting as a zombie for
+ * however long the user takes to hit Enter next. Real shells behave
+ * the same way absent proper job-control signals. */
+#define MAX_JOBS 8
+
+struct bg_job {
+  bool used;
+  uint32_t job_id;
+  struct task *task;
+  char name[32];
+};
+static struct bg_job jobs[MAX_JOBS];
+static uint32_t next_job_id = 1;
+
+/* Strips a trailing `&` (and surrounding whitespace) in place --
+ * the one bit of syntax this parser understands beyond "everything
+ * after the verb is args, verbatim" (see docs/Design.md's note on
+ * quoting). Mutates `s` directly; every caller here passes a handler's
+ * `args`, which always points into shell_task()'s own `line` buffer,
+ * not a string literal, so this is safe. */
+static bool strip_trailing_background(char *s) {
+  size_t len = strlen(s);
+  while (len > 0 && s[len - 1] == ' ') {
+    len--;
+  }
+  if (len == 0 || s[len - 1] != '&') {
+    return false;
+  }
+  len--;
+  while (len > 0 && s[len - 1] == ' ') {
+    len--;
+  }
+  s[len] = '\0';
+  return true;
+}
+
+static void reap_finished_jobs(void) {
+  for (int i = 0; i < MAX_JOBS; i++) {
+    if (!jobs[i].used) {
+      continue;
+    }
+    if (!sched_task_is_dead(jobs[i].task)) {
+      continue;
+    }
+
+    /* Capture everything we need to print BEFORE calling
+     * process_wait() -- that frees jobs[i].task (it's already
+     * TASK_DEAD, so sched_wait_task() takes the non-blocking reap
+     * path straight to kfree()), so touching the pointer again after
+     * would be a use-after-free. */
+    uint64_t pid = jobs[i].task->id;
+    char name[sizeof(jobs[i].name)];
+    strncpy(name, jobs[i].name, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    uint32_t job_id = jobs[i].job_id;
+
+    int code = process_wait(jobs[i].task);
+    jobs[i].used = false;
+    jobs[i].task = NULL;
+
+    kprintf("[%u] pid %lu (%s) done, exit code %d\n", job_id, pid, name, code);
+  }
+}
+
 /* -------------------------------- handlers -------------------------------- */
 
 static void cmd_help(const char *args) {
@@ -636,15 +723,97 @@ static void cmd_cat(const char *args) {
 
 static void cmd_run(const char *args) {
   if (*args == '\0') {
-    kprintf("usage: run <path>\n");
+    kprintf("usage: run <path> [&]\n");
     return;
   }
-  struct task *t = process_spawn(args, args);
+
+  char pathbuf[LINE_MAX];
+  strncpy(pathbuf, args, sizeof(pathbuf) - 1);
+  pathbuf[sizeof(pathbuf) - 1] = '\0';
+
+  bool background = strip_trailing_background(pathbuf);
+
+  struct task *t = process_spawn(pathbuf, pathbuf);
   if (t == NULL) {
     return;
   }
-  int code = process_wait(t);
-  kprintf("[%s exited with code %d]\n", args, code);
+
+  if (!background) {
+    int code = process_wait(t);
+    kprintf("[%s exited with code %d]\n", pathbuf, code);
+    return;
+  }
+
+  int slot = -1;
+  for (int i = 0; i < MAX_JOBS; i++) {
+    if (!jobs[i].used) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    kprintf("run: job table full (%d slots) -- 'jobs' to see them, wait for "
+            "one to finish, or 'kill' one first\n",
+            MAX_JOBS);
+    return;
+  }
+
+  jobs[slot].used = true;
+  jobs[slot].job_id = next_job_id++;
+  jobs[slot].task = t;
+  strncpy(jobs[slot].name, pathbuf, sizeof(jobs[slot].name) - 1);
+  jobs[slot].name[sizeof(jobs[slot].name) - 1] = '\0';
+
+  kprintf("[%u] pid %lu\n", jobs[slot].job_id, t->id);
+}
+
+static void cmd_jobs(const char *args) {
+  (void)args;
+  reap_finished_jobs();
+  bool any = false;
+  for (int i = 0; i < MAX_JOBS; i++) {
+    if (!jobs[i].used) {
+      continue;
+    }
+    kprintf("  [%u]  pid %-6lu  %s\n", jobs[i].job_id, jobs[i].task->id,
+            jobs[i].name);
+    any = true;
+  }
+  if (!any) {
+    kprintf("(no background jobs)\n");
+  }
+}
+
+static void cmd_kill(const char *args) {
+  if (*args == '\0') {
+    kprintf("usage: kill <pid>\n");
+    return;
+  }
+  bool all_digits = true;
+  for (const char *p = args; *p; p++) {
+    if (*p < '0' || *p > '9') {
+      all_digits = false;
+      break;
+    }
+  }
+  if (!all_digits) {
+    kprintf("kill: '%s' isn't a pid -- see 'jobs' or 'ps'\n", args);
+    return;
+  }
+  uint64_t pid = 0;
+  for (const char *p = args; *p; p++) {
+    pid = pid * 10 + (uint64_t)(*p - '0');
+  }
+
+  struct task *t = sched_find_waitable_task(pid);
+  if (t == NULL) {
+    kprintf("kill: no such ring-3 task with pid %lu\n", pid);
+    return;
+  }
+  sched_kill_task(t);
+  kprintf("kill: signalled pid %lu -- it exits at its next syscall (see "
+          "sched_kill_task() for why not instantly)\n",
+          pid);
 }
 
 #define MATRIX_COLS_MAX 256
@@ -1016,6 +1185,18 @@ static void cmd_gclear(const char *args) {
   (void)args;
   graph_clear_all(); /* logs its own outcome */
 }
+
+static void cmd_ggc(const char *args) {
+  (void)args;
+  uint32_t freed = graph_collect_cycles();
+  if (freed > 0) {
+    kprintf("[graph] gc: freed %u node(s) unreachable from any anchor\n",
+            freed);
+  } else {
+    kprintf("[graph] gc: nothing to collect\n");
+  }
+}
+
 /* --------------------------------- dispatch ------------------------------- */
 
 static void dispatch(char *line) {
@@ -1056,6 +1237,7 @@ void shell_task(void *arg) {
   kprintf("\nWelcome to Nexus. Type 'help' for a list of commands.\n");
 
   for (;;) {
+    reap_finished_jobs();
     print_prompt();
     read_line(line, sizeof(line));
     dispatch(line);

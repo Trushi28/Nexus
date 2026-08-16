@@ -37,7 +37,7 @@ struct gnode {
                                   (A->B->C->...) being released can't blow
                                   the kernel stack. Scratch only -- has no
                                   meaning outside of an active cascade. */
-
+  bool gc_marked;
   struct gnode *reg_next;
 };
 
@@ -51,6 +51,7 @@ void graph_unlink(struct gnode *from, const char *edge_name);
 
 void graph_node_delete(struct gnode *n);
 void graph_clear_all(void);
+uint32_t graph_collect_cycles(void);
 
 struct gnode *graph_edge_lookup(struct gnode *from, const char *name);
 bool graph_list_edges(struct gnode *from, uint32_t index, char *name_out,

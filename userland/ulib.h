@@ -47,7 +47,14 @@ int u_read(int fd, void *buf, size_t len);
 int u_close(int fd);
 bool u_readdir(const char *path, unsigned index, char *name_out,
                size_t name_max);
+int u_kill(int pid); /* -> 0, or -1 */
 
+/* Linear scan over u_ps() until `pid` matches -- there's no
+ * find-by-pid syscall, SYS_ps only takes a registry index, so this is
+ * userland's equivalent of sched_find_waitable_task() for code that
+ * only has a pid (nsh's background-job table uses this to poll "is it
+ * done yet?"). O(live task count) per call; fine at this scale. */
+bool u_find_task(int pid, nx_task_info_t *out);
 /* Task listing -- see abi/syscall_nr.h's SYS_ps. Fills `out` with the
  * `index`'th currently-registered task (kernel or ring-3), same order
  * the kernel shell's own `ps` walks. False once `index` is past the

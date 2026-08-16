@@ -116,20 +116,23 @@ been verified and what's honestly still missing. See the main
   also means a load exercises the identical code path a live gmk/glink
   session would, rather than a separate, easier-to-get-wrong
   reconstruction path.
-  - **Graph FS deletion is plain refcounting, not a garbage collector**:
+- **Graph FS deletion is refcounting with a mark-and-sweep backstop**:
   graph_unlink()/sstring_unset()/graph_node_delete() (fs/graph.c) free
   a node the instant its refcount hits 0, cascading through whatever
-  it pointed to. Iterative, not recursive (an explicit worklist via
+  it pointed to -- iterative, not recursive (an explicit worklist via
   struct gnode::release_next, mirroring sched.c's pending_exit/
   parked_head pattern) so a long chain being released can't blow the
-  kernel stack. No force-delete exists -- a still-referenced node
-  refuses to go, since forcing it would leave dangling edges. The one
-  permanent gap: reference cycles never reach refcount 0 through edge
-  decrements and are never freed this way; graph_clear_all() (`gclear`)
-  is the closest thing to a way out and honestly reports what's left
-  over if something's cyclic. Closing that gap for real needs a
-  mark-and-sweep pass, which is meaningfully more work and not v1
-  scope.
+  kernel stack. No force-delete exists for a still-referenced node --
+  forcing it would leave dangling edges. Refcounting alone can't
+  reclaim a reference cycle (two or more nodes keeping each other's
+  count above 0 with no path in from any sstring anchor), so `ggc`
+  (graph_collect_cycles()) backstops it with a real mark-and-sweep:
+  BFS-mark everything reachable from every current anchor, free
+  whatever the sweep never reached. `gclear` shares the identical
+  sweep -- it just drops every anchor first, which makes "unreachable"
+  correctly mean "everything", so gclear now empties the graph
+  completely (cycles included) instead of reporting cyclic leftovers
+  and pointing at a reboot.
 
 ## Known limitations
 
@@ -171,18 +174,20 @@ been verified and what's honestly still missing. See the main
   - Tab-completion's path matching only understands the classic VFS
   namespace ("/", tmpfs, the initrd) -- graph-FS paths (gcat/gls/
   sstring targets) don't complete yet.
-- The graph filesystem (fs/graph.c) can free nodes now (grm/gunlink/
-  sstringrm/gclear -- plain refcounting, see the design note above),
-  but reference cycles permanently leak: a node only reachable through
-  a cycle is never freed short of a reboot. graph_load_from_disk()
-  still refuses to run against a non-empty in-memory graph -- run
-  gclear first if you want to reload mid-session. A node created after
-  a gload draws its id from the restored counter, which can numerically
-  reuse an id that existed earlier in the same session (never one
-  currently live -- just a cosmetic wrinkle worth knowing about).
-  Persistence itself is still a whole-graph snapshot (gsync/gload), not
-  continuous durability, capped at GRAPH_SNAPSHOT_MAX_BYTES (1MiB by
-  default). One coarse lock covers the whole graph.
+- The graph filesystem (fs/graph.c) frees nodes via refcounting
+  (grm/gunlink/sstringrm), with `ggc`/`gclear` as a mark-and-sweep
+  backstop for reference cycles that refcounting alone can't reach --
+  see the design note above. `ggc` collects against the current anchor
+  set without disturbing anything still reachable; `gclear` wipes
+  everything. graph_load_from_disk() still refuses to run against a
+  non-empty in-memory graph -- run gclear first if you want to reload
+  mid-session. A node created after a gload draws its id from the
+  restored counter, which can numerically reuse an id that existed
+  earlier in the same session (never one currently live -- just a
+  cosmetic wrinkle worth knowing about). Persistence itself is still a
+  whole-graph snapshot (gsync/gload), not continuous durability, capped
+  at GRAPH_SNAPSHOT_MAX_BYTES (1MiB by default). One coarse lock covers
+  the whole graph.
 
 ## Verification performed here
 

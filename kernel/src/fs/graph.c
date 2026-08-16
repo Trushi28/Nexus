@@ -149,6 +149,130 @@ static uint32_t release_cascade_locked(struct gnode *start) {
   return freed;
 }
 
+/* Caller holds graph_lock. Mark-and-sweep over the CURRENT anchor set:
+ * BFS-marks everything reachable from every sstring anchor, then frees
+ * every registered node the BFS never reached. Shared by
+ * graph_collect_cycles() (the standalone `ggc` command -- collects
+ * against whatever anchors currently exist) and graph_clear_all()
+ * (which has already dropped every anchor by the time it calls this,
+ * so here "unreachable" correctly means "everything" -- see that
+ * function's own comment). Returns the number of nodes freed. */
+static uint32_t collect_cycles_locked(void) {
+  for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
+    n->gc_marked = false;
+  }
+
+  struct gnode *worklist = NULL;
+  for (uint32_t i = 0; i < SSTRING_MAX_ENTRIES; i++) {
+    if (!sstrings[i].used) {
+      continue;
+    }
+    struct gnode *root = sstrings[i].anchor;
+    if (!root->gc_marked) {
+      root->gc_marked = true;
+      root->release_next = worklist;
+      worklist = root;
+    }
+  }
+
+  while (worklist != NULL) {
+    struct gnode *n = worklist;
+    worklist = n->release_next;
+
+    for (struct gedge *e = n->edges; e != NULL; e = e->next) {
+      struct gnode *t = e->target;
+      if (!t->gc_marked) {
+        t->gc_marked = true;
+        t->release_next = worklist;
+        worklist = t;
+      }
+    }
+  }
+
+  /* Snapshot every unmarked node into its own list BEFORE freeing any
+   * of them -- freeing mutates registry_head/reg_next out from under
+   * a live iterator over that same list, same reasoning as
+   * graph_clear_all()'s old orphan pass used. */
+  struct gnode *dead = NULL;
+  uint32_t dead_count = 0;
+  for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
+    if (!n->gc_marked) {
+      n->release_next = dead;
+      dead = n;
+      dead_count++;
+    }
+  }
+  if (dead_count == 0) {
+    return 0;
+  }
+
+  for (struct gnode *n = dead; n != NULL; n = n->release_next) {
+    struct gnode **pp = &registry_head;
+    while (*pp != NULL && *pp != n) {
+      pp = &(*pp)->reg_next;
+    }
+    if (*pp == n) {
+      *pp = n->reg_next;
+    }
+  }
+
+  /* Free every dead node's own storage. An edge target that's ALSO
+   * unmarked (another member of the same cycle/dead group) is left
+   * alone -- it's already slated for the same fate elsewhere in this
+   * same `dead` list, so decrementing its refcount would be
+   * meaningless bookkeeping for a value nobody will read again, and
+   * could otherwise trigger a redundant release_cascade_locked() on a
+   * node this very loop is about to free directly anyway. An edge
+   * target that IS marked (a live, externally-reachable node this
+   * dead group merely happened to point at) gets a real decrement --
+   * and if that's genuinely its last reference, it goes through the
+   * ordinary release_cascade_locked() path, exactly as if a live
+   * gunlink had just severed the edge. That decrement can never
+   * prematurely free a live target out from under a second dead-group
+   * edge pointing at the same node: a target only stays "marked" in
+   * the first place because SOME live path (an anchor or a live
+   * node's edge) reaches it independent of anything in `dead`, so its
+   * refcount can never be reduced to 0 by dead-group edges alone. */
+  uint32_t freed = 0;
+  for (struct gnode *n = dead; n != NULL;) {
+    struct gnode *next_dead = n->release_next;
+
+    struct gedge *e = n->edges;
+    while (e != NULL) {
+      struct gedge *next_e = e->next;
+      struct gnode *target = e->target;
+      if (target->gc_marked) {
+        target->refcount--;
+        if (target->refcount == 0) {
+          freed += release_cascade_locked(target);
+        }
+      }
+      kfree(e);
+      e = next_e;
+    }
+
+    if (n->data != NULL) {
+      kfree(n->data);
+    }
+    kfree(n);
+    freed++;
+
+    n = next_dead;
+  }
+
+  return freed;
+}
+
+uint32_t graph_collect_cycles(void) {
+  uint64_t f = spinlock_acquire_irqsave(&graph_lock);
+  uint32_t freed = collect_cycles_locked();
+  spinlock_release_irqrestore(&graph_lock, f);
+  if (freed > 0) {
+    graph_mark_dirty();
+  }
+  return freed;
+}
+
 void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
   uint64_t f = spinlock_acquire_irqsave(&graph_lock);
   struct gedge *existing = find_edge_locked(from, edge_name);
@@ -257,35 +381,11 @@ void graph_node_delete(struct gnode *n) {
 
 void graph_clear_all(void) {
   uint64_t f = spinlock_acquire_irqsave(&graph_lock);
-
-  uint32_t freed = 0;
-
   for (uint32_t i = 0; i < SSTRING_MAX_ENTRIES; i++) {
-    if (!sstrings[i].used) {
-      continue;
-    }
     sstrings[i].used = false;
-    struct gnode *anchor = sstrings[i].anchor;
-    anchor->refcount--;
-    if (anchor->refcount == 0) {
-      freed += release_cascade_locked(anchor);
-    }
   }
 
-  struct gnode *orphans = NULL;
-  for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
-    if (n->refcount == 0) {
-      n->release_next = orphans;
-      orphans = n;
-    }
-  }
-  while (orphans != NULL) {
-    struct gnode *n = orphans;
-    orphans = n->release_next;
-    if (n->refcount == 0) {
-      freed += release_cascade_locked(n);
-    }
-  }
+  uint32_t freed = collect_cycles_locked();
 
   uint32_t remaining = 0;
   for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
@@ -295,16 +395,15 @@ void graph_clear_all(void) {
   spinlock_release_irqrestore(&graph_lock, f);
 
   if (freed > 0) {
-    graph_mark_dirty(); /* an already-empty gclear touched nothing --
-                            don't manufacture a save for it */
+    graph_mark_dirty();
   }
 
   if (remaining == 0) {
     kprintf("[graph] cleared -- freed %u node(s)\n", freed);
   } else {
-    kprintf("[graph] cleared -- freed %u node(s), %u node(s) remain "
-            "(likely a reference cycle -- see fs/graph.h; reboot to "
-            "fully reset)\n",
+    kprintf("[graph] cleared -- freed %u node(s), %u node(s) unexpectedly "
+            "remain (this points at a bug in collect_cycles_locked(), "
+            "not a cyclic leftover -- please report it)\n",
             freed, remaining);
   }
 }

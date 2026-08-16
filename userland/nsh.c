@@ -24,6 +24,8 @@ static void cmd_ps(const char *args);
 static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
 static void cmd_run(const char *args);
+static void cmd_jobs(const char *args);
+static void cmd_kill(const char *args);
 static void cmd_topcmds(const char *args);
 static void cmd_exit(const char *args);
 
@@ -47,7 +49,10 @@ static struct nsh_command commands[] = {
     {"ps", cmd_ps, "", "list every live task", 0},
     {"ls", cmd_ls, "[path]", "list a directory (default: /)", 0},
     {"cat", cmd_cat, "<path>", "print a file's contents", 0},
-    {"run", cmd_run, "<path>", "spawn an ELF binary and wait for it", 0},
+    {"run", cmd_run, "<path>",
+     "spawn an ELF binary and wait for it (append & to background it)", 0},
+    {"jobs", cmd_jobs, "", "list background jobs spawned with 'run ... &'", 0},
+    {"kill", cmd_kill, "<pid>", "signal a task to exit at its next syscall", 0},
     {"topcmds", cmd_topcmds, "", "your most-used commands this session", 0},
     {"exit", cmd_exit, "[code]", "leave the ring-3 shell", 0},
 };
@@ -160,6 +165,78 @@ static void suggest_commands(const char *typed) {
   u_print("\n");
 }
 
+#define MAX_JOBS 8
+#define NX_TASK_STATE_DEAD                                                     \
+  5 /* mirrors enum task_state in sched/sched.h --                             \
+        see abi/task_info.h's comment on why this                              \
+        crosses the user/kernel boundary as a bare                             \
+        numeric constant, not a shared enum. */
+
+struct bg_job {
+  bool used;
+  unsigned job_id;
+  int pid;
+  char name[32];
+};
+static struct bg_job jobs[MAX_JOBS];
+static unsigned next_job_id = 1;
+
+static bool strip_trailing_background(char *s) {
+  size_t len = u_strlen(s);
+  while (len > 0 && s[len - 1] == ' ') {
+    len--;
+  }
+  if (len == 0 || s[len - 1] != '&') {
+    return false;
+  }
+  len--;
+  while (len > 0 && s[len - 1] == ' ') {
+    len--;
+  }
+  s[len] = '\0';
+  return true;
+}
+
+static void reap_finished_jobs(void) {
+  for (int i = 0; i < MAX_JOBS; i++) {
+    if (!jobs[i].used) {
+      continue;
+    }
+    nx_task_info_t info;
+    if (!u_find_task(jobs[i].pid, &info)) {
+      jobs[i].used = false; /* gone -- nothing left to wait() on */
+      continue;
+    }
+    if (info.state != NX_TASK_STATE_DEAD) {
+      continue;
+    }
+
+    int pid = jobs[i].pid;
+    char name[sizeof(jobs[i].name)];
+    u_strncpy(name, jobs[i].name, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    unsigned job_id = jobs[i].job_id;
+    jobs[i].used = false;
+
+    int code = u_wait(pid);
+
+    char idbuf[16], pidbuf[16], codebuf[16];
+    u_itoa((int)job_id, idbuf);
+    u_itoa(pid, pidbuf);
+    u_itoa(code, codebuf);
+
+    u_print("[");
+    u_print(idbuf);
+    u_print("] pid ");
+    u_print(pidbuf);
+    u_print(" (");
+    u_print(name);
+    u_print(") done, exit code ");
+    u_print(codebuf);
+    u_print("\n");
+  }
+}
+
 static void cmd_help(const char *args) {
   (void)args;
   u_print("nsh -- ring-3 Nexus shell. Commands:\n");
@@ -248,24 +325,101 @@ static void cmd_cat(const char *args) {
 
 static void cmd_run(const char *args) {
   if (*args == '\0') {
-    u_print("usage: run <path>\n");
+    u_print("usage: run <path> [&]\n");
     return;
   }
-  int pid = u_spawn(args);
+
+  char pathbuf[LINE_MAX];
+  u_strncpy(pathbuf, args, sizeof(pathbuf) - 1);
+  pathbuf[sizeof(pathbuf) - 1] = '\0';
+
+  bool background = strip_trailing_background(pathbuf);
+
+  int pid = u_spawn(pathbuf);
   if (pid < 0) {
     u_print("run: couldn't spawn '");
-    u_print(args);
+    u_print(pathbuf);
     u_print("'\n");
     return;
   }
-  int code = u_wait(pid);
-  char buf[16];
+
+  if (!background) {
+    int code = u_wait(pid);
+    char buf[16];
+    u_print("[");
+    u_print(pathbuf);
+    u_print(" exited with code ");
+    u_itoa(code, buf);
+    u_print(buf);
+    u_print("]\n");
+    return;
+  }
+
+  int slot = -1;
+  for (int i = 0; i < MAX_JOBS; i++) {
+    if (!jobs[i].used) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    u_print("run: job table full -- see 'jobs', or wait for one to "
+            "finish\n");
+    return;
+  }
+
+  jobs[slot].used = true;
+  jobs[slot].job_id = next_job_id++;
+  jobs[slot].pid = pid;
+  u_strncpy(jobs[slot].name, pathbuf, sizeof(jobs[slot].name) - 1);
+  jobs[slot].name[sizeof(jobs[slot].name) - 1] = '\0';
+
+  char idbuf[16], pidbuf[16];
+  u_itoa((int)jobs[slot].job_id, idbuf);
+  u_itoa(pid, pidbuf);
   u_print("[");
-  u_print(args);
-  u_print(" exited with code ");
-  u_itoa(code, buf);
-  u_print(buf);
-  u_print("]\n");
+  u_print(idbuf);
+  u_print("] pid ");
+  u_print(pidbuf);
+  u_print("\n");
+}
+
+static void cmd_jobs(const char *args) {
+  (void)args;
+  reap_finished_jobs();
+  bool any = false;
+  for (int i = 0; i < MAX_JOBS; i++) {
+    if (!jobs[i].used) {
+      continue;
+    }
+    char idbuf[16], pidbuf[16];
+    u_itoa((int)jobs[i].job_id, idbuf);
+    u_itoa(jobs[i].pid, pidbuf);
+    u_print("  [");
+    u_print(idbuf);
+    u_print("]  pid ");
+    u_print(pidbuf);
+    u_print("  ");
+    u_print(jobs[i].name);
+    u_print("\n");
+    any = true;
+  }
+  if (!any) {
+    u_print("(no background jobs)\n");
+  }
+}
+
+static void cmd_kill(const char *args) {
+  if (*args == '\0') {
+    u_print("usage: kill <pid>\n");
+    return;
+  }
+  int pid = u_atoi(args);
+  if (u_kill(pid) < 0) {
+    u_print("kill: no such ring-3 task\n");
+    return;
+  }
+  u_print("kill: signalled -- exits at its next syscall\n");
 }
 
 static void cmd_topcmds(const char *args) {
@@ -348,6 +502,7 @@ int main(void) {
 
   char line[LINE_MAX];
   while (!g_should_exit) {
+    reap_finished_jobs();
     u_print("nsh> ");
     u_read_line(line, sizeof(line));
     dispatch(line);
