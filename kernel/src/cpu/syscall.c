@@ -202,6 +202,17 @@ static void sys_open_impl(struct interrupt_frame *f) {
     return;
   }
 
+  if ((flags & O_TRUNC) != 0 && !vfs_truncate(file)) {
+    /* Asked for O_TRUNC but the filesystem behind this path can't
+     * do it (no writable filesystem exists in v1 besides tmpfs, so
+     * this is unreachable today -- kept as a real check, not an
+     * assert, so a future read-only mount fails the open cleanly
+     * instead of silently ignoring the flag). */
+    vfs_close(file);
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
   t->fds[slot] = file;
   f->rax = (uint64_t)slot;
 }
@@ -261,17 +272,29 @@ static void sys_brk_impl(struct interrupt_frame *f) {
     for (uint64_t va = old_top; va < new_top; va += PAGE_SIZE) {
       uint64_t phys = pmm_alloc_page();
       if (phys == 0) {
-        f->rax = t->brk; /* out of memory: brk stays where it was */
+        /* Out of memory partway through growing. Every page mapped
+         * by earlier loop iterations stays mapped and IS accounted
+         * for -- t->brk tracks exactly how far we actually got, one
+         * page at a time, rather than jumping straight to `req` only
+         * on full success. Without this, a later retry would recompute
+         * old_top from the stale (unmoved) t->brk, walk over
+         * already-mapped virtual addresses again, and overwrite their
+         * PTEs with freshly allocated pages -- leaking the physical
+         * frames mapped there the first time around. */
+        f->rax = t->brk;
         return;
       }
       vmm_map_page_in(t->cr3_phys, va, phys,
                       VMM_PRESENT | VMM_WRITABLE | VMM_USER | VMM_NX);
+      t->brk = va + PAGE_SIZE;
     }
+  } else if (new_top < old_top) {
+    /* Actually give the released pages back, unlike the old
+     * "just move the pointer and leave everything mapped" behaviour
+     * -- see vmm_unmap_range_in()'s comment for why only a local
+     * invlpg is needed here (no cross-cpu shootdown). */
+    vmm_unmap_range_in(t->cr3_phys, new_top, old_top - new_top);
   }
-  /* Shrinking just moves the pointer back without unmapping -- none
-   * of v1's demo programs ever shrink, and freeing those pages
-   * properly is easy to add later (vmm_free_user_space() already
-   * shows the walk). */
 
   t->brk = req;
   f->rax = t->brk;

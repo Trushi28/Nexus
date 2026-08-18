@@ -5,14 +5,13 @@
 
 /* Minimal NVMe driver: brings up the controller's admin queue, creates
  * one I/O submission/completion queue pair, and identifies namespace 1.
- * Polled throughout -- no MSI-X wiring yet, even though drivers/pci.h
- * already has the machinery for it. Deliberate sequencing: prove the
- * queue mechanics (PRP building, doorbells, completion parsing) are
- * correct against a synchronous poll loop first, where a bug just hangs
- * this one request instead of silently misrouting an interrupt. Once
- * that's proven, swapping the poll loop in submit_and_wait() for a
- * wait_queue_block()/wake() pair fed by a real MSI-X handler is a
- * contained, separate change.
+ * Command completion is MSI-X-driven (admin queue on vector 0, I/O
+ * queue on vector 1): submit_and_wait() registers on the queue's
+ * wait_queue and task_block()s, and the ISR (nvme_admin_irq_handler()/
+ * nvme_io_irq_handler() in nvme.c) wakes it -- the request-blocks-a-
+ * task model every other blocking primitive in this kernel uses, not
+ * a poll loop. There's no timeout on that wait, consistent with the
+ * rest of the kernel's blocking waits.
  *
  * v1 also deliberately doesn't: support more than one namespace, chain
  * multiple PRP-list pages (caps a single request at ~2MiB), flush,

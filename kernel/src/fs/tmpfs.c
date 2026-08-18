@@ -15,6 +15,7 @@ static struct vnode *tmpfs_create(struct vnode *dir, const char *name, enum vnod
 static bool          tmpfs_readdir(struct vnode *dir, uint32_t index, char *name_out, size_t name_max);
 static size_t        tmpfs_read(struct vnode *node, uint64_t offset, void *buf, size_t len);
 static size_t        tmpfs_write(struct vnode *node, uint64_t offset, const void *buf, size_t len);
+static bool          tmpfs_truncate(struct vnode *node);
 
 static const struct vnode_ops tmpfs_ops = {
     .read = tmpfs_read,
@@ -22,6 +23,7 @@ static const struct vnode_ops tmpfs_ops = {
     .lookup = tmpfs_lookup,
     .create = tmpfs_create,
     .readdir = tmpfs_readdir,
+    .truncate = tmpfs_truncate,
 };
 
 static struct tmpfs_node *tmpfs_alloc(const char *name, enum vnode_type type) {
@@ -130,4 +132,17 @@ static size_t tmpfs_write(struct vnode *node, uint64_t offset, const void *buf, 
         node->size = end;
     }
     return len;
+}
+
+static bool tmpfs_truncate(struct vnode *node) {
+    /* Just drop the logical length back to 0 -- the backing
+     * allocation (n->data/n->capacity) is left exactly as-is, same
+     * spirit as kfree() never shrinking the heap back to the OS: the
+     * next write() reuses it via tmpfs_ensure_capacity()'s existing
+     * growth logic instead of paying to free and re-allocate. Directories
+     * never reach here (tmpfs_ops.truncate is only consulted through
+     * vfs_truncate(), which vfs_open() only calls after confirming
+     * VNODE_FILE). */
+    node->size = 0;
+    return true;
 }

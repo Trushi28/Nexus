@@ -46,6 +46,12 @@ struct vnode_ops {
    * `index` is past the last child. */
   bool (*readdir)(struct vnode *dir, uint32_t index, char *name_out,
                   size_t name_max);
+
+  /* Truncates a file node to zero length. NULL for node types that
+   * can't be truncated (directories -- there's no vnode_ops instance
+   * without one today, but the pointer is still checked rather than
+   * assumed, the same way every other optional op here is). */
+  bool (*truncate)(struct vnode *node);
 };
 
 struct vnode {
@@ -82,6 +88,12 @@ void vfs_close(struct vfs_file *f);
 size_t vfs_read(struct vfs_file *f, void *buf, size_t len);
 size_t vfs_write(struct vfs_file *f, const void *buf, size_t len);
 uint64_t vfs_file_size(struct vfs_file *f);
+
+/* Truncates an already-open file to zero length and resets `f`'s own
+ * read/write offset back to 0 to match (an open fd's offset otherwise
+ * has no way to notice the file shrank out from under it). Returns
+ * false if the underlying filesystem doesn't support truncation. */
+bool vfs_truncate(struct vfs_file *f);
 
 /* Lists directory `path`'s `index`'th entry into `name_out` (a buffer
  * of `name_max` bytes). Returns false once `index` is past the last

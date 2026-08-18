@@ -84,11 +84,15 @@ GNUmakefile    top-level build: fetches Limine, builds everything, packs the ima
 ## Roadmap
 
 - `fork` / `exec`
-- Real `copy_from_user` / `copy_to_user` with page-fault recovery
-- Background jobs (`run &`) and `kill`
 - Slab allocator
 - VFS mount table
 - Block device driver (virtio-blk)
+- Enforce `O_RDONLY`/`O_WRONLY` on open file descriptors (currently accepted but not checked)
+
+Already shipped, despite older notes to the contrary: real `copy_from_user`/
+`copy_to_user` with page-fault recovery (`cpu/usercopy.c`), background jobs
+(`run <path> &`, `jobs`, `kill`) in both shells, and an MSI-X-driven (not
+polled) NVMe driver.
 
 For the design rationale behind specific choices and how this has been
 tested, see [docs/DESIGN.md](docs/DESIGN.md).

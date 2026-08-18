@@ -119,6 +119,17 @@ size_t vfs_write(struct vfs_file *f, const void *buf, size_t len) {
 
 uint64_t vfs_file_size(struct vfs_file *f) { return f->node->size; }
 
+bool vfs_truncate(struct vfs_file *f) {
+  if (f->node->ops->truncate == NULL) {
+    return false;
+  }
+  if (!f->node->ops->truncate(f->node)) {
+    return false;
+  }
+  f->offset = 0;
+  return true;
+}
+
 bool vfs_readdir(const char *path, uint32_t index, char *name_out,
                  size_t name_max) {
   struct vnode *dir = vfs_lookup_path(path);

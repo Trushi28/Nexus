@@ -134,13 +134,32 @@ been verified and what's honestly still missing. See the main
   completely (cycles included) instead of reporting cyclic leftovers
   and pointing at a reboot.
 
+- **`sys_brk` shrink is a real unmap, not just a pointer move**:
+  `vmm_unmap_page_in()`/`vmm_unmap_range_in()` (mm/vmm.c) walk to each
+  leaf PTE, clear it, `invlpg` it locally, and hand the physical frame
+  back to the PMM. Only a local invalidation, not a
+  `vmm_flush_tlb_all_cpus()` shootdown -- unlike the shared kernel
+  mappings that function exists for, a *user* address space belongs to
+  exactly one task, and a task only ever runs on one CPU at a time, so
+  no other core can have a stale TLB entry for it to begin with.
+  `sys_brk_impl` also now updates `t->brk` after each page it commits
+  while growing, not just on full success -- otherwise a failed retry
+  after a mid-growth OOM would re-walk already-mapped virtual
+  addresses and overwrite their PTEs with freshly allocated pages,
+  leaking the physical frames mapped there the first time.
+- **`O_TRUNC` is a new optional `vnode_ops` entry, not tmpfs-specific
+  logic bolted onto `vfs_open()`**: `vfs_truncate()` (fs/vfs.c) checks
+  for and calls `ops->truncate` the same way every other optional
+  vnode operation here is dispatched, so a future non-tmpfs mount that
+  can't support truncation (a read-only filesystem, say) fails the
+  `open()` cleanly via a NULL function pointer rather than needing a
+  filesystem-type check somewhere in the VFS layer.
+
 ## Known limitations
 
 - No `fork`, no `exec` — a process is created fully-formed from an ELF
   path via `run`/`process_spawn`; there's no way for a running process
   to replace or duplicate itself, and no argv/envp passing.
-- No background jobs — `run` blocks until the child exits, so there's
-  no `&` and correspondingly no `kill`.
 - No network stack.
 - The direct map and kernel image are mapped with plain 4KiB pages,
   not 2MiB/1GiB huge pages. Simpler and safer to hand off unverified;
@@ -148,18 +167,12 @@ been verified and what's honestly still missing. See the main
 - The framebuffer is mapped write-back (not write-combining) in the
   direct map, for the same reason — simplicity over the last bit of
   fill-rate performance.
-- Syscalls that touch a user pointer (`write`, `read`, `open`,
-  `readdir`) only do a shallow range check — "is this a plausible
-  canonical low-half address" — not a real per-page walk of the
-  caller's page tables with page-fault recovery (a proper
-  `copy_from_user`/`copy_to_user`). A process that hands the kernel a
-  syntactically-valid-but-unmapped pointer takes an unhandled page
-  fault *in the kernel*, which today means a panic instead of just
-  killing that one process. See the comment at the top of
-  `cpu/syscall.c`.
-- `sys_brk` can grow a process's heap but not shrink it (the pointer
-  moves back; the pages stay mapped) — `vmm_free_user_space()` already
-  shows the page-freeing walk if you want to wire it up.
+- `open()`'s `flags` are only partially enforced: `O_CREAT` creates a
+  missing file and `O_TRUNC` truncates an existing one, but
+  `O_RDONLY`/`O_WRONLY`/`O_RDWR` are accepted and otherwise ignored —
+  any open fd can currently be read and written regardless of what it
+  was opened with. `vfs_file` would need to carry its open flags and
+  `sys_read_impl`/`sys_write_impl` would need to check them.
 - tmpfs is the only filesystem; there's no mount table yet, just a
   single root vnode — though the vnode_ops indirection is exactly what
   a mount table would dispatch through.

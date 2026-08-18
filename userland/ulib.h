@@ -39,9 +39,13 @@ int u_wait(int pid);           /* -> exit code, or -1 */
 
 /* Filesystem -- thin wrappers over SYS_open/SYS_read/SYS_close/
  * SYS_readdir. `flags` for u_open() matches abi/syscall_nr.h's
- * O_RDONLY etc -- note the kernel currently ignores it entirely
- * (O_CREAT has never been wired up on the vfs_open() path; that's a
- * preexisting gap, not something this feature touches). */
+ * O_RDONLY etc. O_CREAT creates a missing file (see
+ * cpu/syscall.c's sys_open_impl -> fs/vfs.c's vfs_open()); O_TRUNC
+ * truncates an existing one to zero length on open. Note the kernel
+ * does NOT yet enforce O_RDONLY/O_WRONLY -- any open fd can currently
+ * be both read and written regardless of the flags it was opened
+ * with; that's a known, still-open gap, not something either feature
+ * touches. */
 int u_open(const char *path, int flags);
 int u_read(int fd, void *buf, size_t len);
 int u_write(int fd, const void *buf, size_t len);

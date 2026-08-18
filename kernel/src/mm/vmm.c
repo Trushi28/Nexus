@@ -93,6 +93,64 @@ void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
   map_range_in((uint64_t *)phys_to_virt(pml4_phys), virt, phys, size, flags);
 }
 
+/* Walks to the leaf PT for `table[index]`, returning false (without
+ * creating anything) if any intermediate level isn't present -- the
+ * read-only counterpart to table_get_or_create() above, for the
+ * unmap path, which must never populate a table that a real mapping
+ * never touched. */
+static bool table_lookup(uint64_t *table, size_t index, uint64_t **out) {
+  if (!(table[index] & VMM_PRESENT)) {
+    return false;
+  }
+  *out = (uint64_t *)phys_to_virt(table[index] & ADDR_MASK);
+  return true;
+}
+
+/* Shared worker behind vmm_unmap_page_in()/vmm_unmap_range_in() --
+ * see vmm.h's comment on both for the locking/TLB reasoning. */
+static void unmap_page_in(uint64_t *pml4v, uint64_t virt) {
+  size_t pml4_i = (virt >> 39) & 0x1FF;
+  size_t pdpt_i = (virt >> 30) & 0x1FF;
+  size_t pd_i = (virt >> 21) & 0x1FF;
+  size_t pt_i = (virt >> 12) & 0x1FF;
+
+  uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
+
+  uint64_t *pdpt, *pd, *pt;
+  if (!table_lookup(pml4v, pml4_i, &pdpt) ||
+      !table_lookup(pdpt, pdpt_i, &pd) ||
+      !table_lookup(pd, pd_i, &pt)) {
+    spinlock_release_irqrestore(&vmm_lock, f);
+    return; /* nothing mapped along this path -- nothing to undo */
+  }
+
+  uint64_t entry = pt[pt_i];
+  if (!(entry & VMM_PRESENT)) {
+    spinlock_release_irqrestore(&vmm_lock, f);
+    return;
+  }
+  pt[pt_i] = 0;
+
+  spinlock_release_irqrestore(&vmm_lock, f);
+
+  invlpg(virt);
+  pmm_free_page(entry & ADDR_MASK);
+}
+
+void vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt) {
+  unmap_page_in((uint64_t *)phys_to_virt(pml4_phys), virt);
+}
+
+void vmm_unmap_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t size) {
+  uint64_t start = ALIGN_DOWN(virt, PAGE_SIZE);
+  uint64_t end = ALIGN_UP(virt + size, PAGE_SIZE);
+  uint64_t *pml4v = (uint64_t *)phys_to_virt(pml4_phys);
+
+  for (uint64_t v = start; v < end; v += PAGE_SIZE) {
+    unmap_page_in(pml4v, v);
+  }
+}
+
 uint64_t vmm_new_address_space(void) {
   uint64_t phys = pmm_alloc_page(); /* zeroed */
   if (phys == 0) {

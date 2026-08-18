@@ -44,6 +44,22 @@ uint64_t vmm_new_address_space(void);
 void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags);
 
+/* Unmaps a single page (if one is mapped there -- a no-op otherwise)
+ * from the given address space: clears the leaf PTE, invalidates it
+ * locally, and frees the physical frame it pointed at back to the
+ * PMM. Does NOT reclaim now-possibly-empty intermediate page-table
+ * levels (PT/PD/PDPT) -- same "keep it simple" tradeoff
+ * vmm_free_user_space() already makes for the whole-address-space
+ * case, just not walking back up to check emptiness here. Only a
+ * local invlpg, not a full vmm_flush_tlb_all_cpus() shootdown: every
+ * caller targets a *user* address space belonging to exactly one
+ * task, and a task only ever runs on one CPU at a time, so no other
+ * core can have this mapping cached. Callers that unmap kernel-shared
+ * mappings (there are none yet) would need the cross-cpu variant
+ * instead. */
+void vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
+void vmm_unmap_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t size);
+
 /* Frees every page-table level and every mapped physical page in the
  * *lower* half (user space, PML4 indices 0-255) of the given address
  * space, then frees the PML4 itself. Never touches the shared upper
