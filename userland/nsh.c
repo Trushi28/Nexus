@@ -24,6 +24,7 @@ static void cmd_ps(const char *args);
 static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
 static void cmd_run(const char *args);
+static void cmd_exec(const char *args);
 static void cmd_jobs(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_topcmds(const char *args);
@@ -37,10 +38,9 @@ struct nsh_synonym {
 };
 
 static const struct nsh_synonym synonyms[] = {
-    {"list", "ls"},     {"dir", "ls"},    {"type", "cat"},  {"read", "cat"},
-    {"exec", "run"},    {"spawn", "run"}, {"start", "run"}, {"tasks", "ps"},
-    {"procs", "ps"},    {"who", "ps"},    {"say", "echo"},  {"quit", "exit"},
-    {"logout", "exit"},
+    {"list", "ls"},   {"dir", "ls"},    {"type", "cat"},  {"read", "cat"},
+    {"spawn", "run"}, {"start", "run"}, {"tasks", "ps"},  {"procs", "ps"},
+    {"who", "ps"},    {"say", "echo"},  {"quit", "exit"}, {"logout", "exit"},
 };
 
 static struct nsh_command commands[] = {
@@ -51,6 +51,10 @@ static struct nsh_command commands[] = {
     {"cat", cmd_cat, "<path>", "print a file's contents", 0},
     {"run", cmd_run, "<path>",
      "spawn an ELF binary and wait for it (append & to background it)", 0},
+    {"exec", cmd_exec, "<path>",
+     "replace THIS shell's own image with an ELF binary -- same pid, no return "
+     "on success",
+     0},
     {"jobs", cmd_jobs, "", "list background jobs spawned with 'run ... &'", 0},
     {"kill", cmd_kill, "<pid>", "signal a task to exit at its next syscall", 0},
     {"topcmds", cmd_topcmds, "", "your most-used commands this session", 0},
@@ -382,6 +386,19 @@ static void cmd_run(const char *args) {
   u_print("] pid ");
   u_print(pidbuf);
   u_print("\n");
+}
+
+static void cmd_exec(const char *args) {
+  if (*args == '\0') {
+    u_print("usage: exec <path>\n");
+    return;
+  }
+  u_exec(args);
+  /* Only reaches here if exec() failed -- on success this shell's own
+   * image has already been replaced and control never returns here. */
+  u_print("exec: couldn't exec '");
+  u_print(args);
+  u_print("'\n");
 }
 
 static void cmd_jobs(const char *args) {

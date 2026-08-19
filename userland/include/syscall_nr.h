@@ -6,9 +6,7 @@
  * Canonical source: kernel/src/abi/syscall_nr.h -- kept identical here
  * because userland and the kernel are separate build trees with no
  * shared installed sysroot. If you change one, change the other.
- */
-
-/*
+ *
  * Nexus's syscall ABI: the numbers and flag bits that ring-3 code and
  * the kernel's syscall dispatcher (cpu/syscall.c) both need to agree
  * on. Deliberately just #defines -- no kernel-only types -- so this
@@ -37,8 +35,9 @@
 #define SYS_wait      12 /* wait(pid)                                    -> exit code, or -1 */
 #define SYS_ps        13 /* ps(index, nx_task_info_t *out)                 -> 0, or -1 at EOF */
 #define SYS_kill      14 /* kill(pid)                                       -> 0, or -1 */
+#define SYS_exec      15 /* exec(path)                    -> never returns on success, -1 on failure */
 
-#define SYS_COUNT     15
+#define SYS_COUNT     16
 
 /* open() flags -- deliberately tiny; no O_APPEND yet. */
 #define O_RDONLY 0x0

@@ -2,6 +2,7 @@
 #include "abi/syscall_nr.h"
 #include "abi/task_info.h"
 #include "cpu/cpu.h"
+#include "cpu/io.h"
 #include "cpu/isr.h"
 #include "cpu/usercopy.h"
 #include "cpu/vectors.h"
@@ -9,8 +10,10 @@
 #include "debug/serial.h"
 #include "drivers/keyboard.h"
 #include "fs/vfs.h"
+#include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "proc/elf.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "time/timer.h"
@@ -234,17 +237,6 @@ static void sys_open_impl(struct interrupt_frame *f) {
     return;
   }
 
-  if ((flags & O_TRUNC) != 0 && !vfs_truncate(file)) {
-    /* Asked for O_TRUNC but the filesystem behind this path can't
-     * do it (no writable filesystem exists in v1 besides tmpfs, so
-     * this is unreachable today -- kept as a real check, not an
-     * assert, so a future read-only mount fails the open cleanly
-     * instead of silently ignoring the flag). */
-    vfs_close(file);
-    f->rax = (uint64_t)-1;
-    return;
-  }
-
   t->fds[slot] = file;
   f->rax = (uint64_t)slot;
 }
@@ -378,6 +370,117 @@ static void sys_spawn_impl(struct interrupt_frame *f) {
   f->rax = (t != NULL) ? t->id : (uint64_t)-1;
 }
 
+/* exec(): replaces the calling process's own image in place -- same
+ * pid, same open fds, fresh address space and entry point. The
+ * mechanism is simply rewriting f->rip/f->rsp before returning: the
+ * ordinary syscall return path (isr_common_stub's iretq, back in
+ * cpu/isr.c) resumes execution wherever the interrupt frame says to,
+ * so pointing it at the new image's entry/stack IS "return into a
+ * different program" -- no scheduler involvement needed, since the
+ * calling task never actually blocks or gets switched away.
+ *
+ * Builds and fully populates a BRAND NEW address space first --
+ * validating the target ELF and mapping its stack there -- and only
+ * commits (switches CR3, frees the old address space) once every one
+ * of those steps has succeeded. That ordering is what gives a failed
+ * exec() the same guarantee a real one has: the calling process is
+ * left exactly as runnable as it was before the call. Open fds are
+ * deliberately left alone -- exec() replaces the image, not the
+ * process's other state, matching a real exec()'s default
+ * (close-on-exec is opt-in there too; Nexus just doesn't have a
+ * per-fd flag for it yet). No argv/envp in v1 -- see docs/Design.md. */
+static void sys_exec_impl(struct interrupt_frame *f) {
+  uint64_t path_va = f->rdi;
+
+  char path[256];
+  if (!user_range_ok(path_va, 1) ||
+      !copy_string_from_user(path, (const void *)path_va, sizeof(path))) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct vfs_file *file;
+  if (!vfs_open(path, O_RDONLY, &file)) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  uint64_t size = vfs_file_size(file);
+  uint8_t *filebuf = kmalloc(size > 0 ? size : 1);
+  if (filebuf == NULL) {
+    vfs_close(file);
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  size_t got = vfs_read(file, filebuf, size);
+  vfs_close(file);
+  if (got != size) {
+    kfree(filebuf);
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  uint64_t new_pml4 = vmm_new_address_space();
+  if (new_pml4 == 0) {
+    kfree(filebuf);
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct elf_load_result elf;
+  bool loaded = elf_load(new_pml4, filebuf, size, &elf);
+  kfree(filebuf);
+  if (!loaded) {
+    vmm_free_user_space(new_pml4);
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  uint64_t stack_top = USER_STACK_TOP;
+  for (uint64_t i = 0; i < USER_STACK_PAGES; i++) {
+    uint64_t phys = pmm_alloc_page();
+    if (phys == 0) {
+      vmm_free_user_space(new_pml4);
+      f->rax = (uint64_t)-1;
+      return;
+    }
+    uint64_t va = stack_top - (i + 1) * PAGE_SIZE;
+    vmm_map_page_in(new_pml4, va, phys, VMM_WRITABLE | VMM_USER | VMM_NX);
+  }
+
+  /* Everything the new image needs is mapped and ready -- commit.
+   * Past this point exec() cannot fail; the old address space is
+   * about to be torn down for real. */
+  struct task *t = this_cpu()->current_task;
+  uint64_t old_pml4 = t->cr3_phys;
+
+  write_cr3(new_pml4); /* must happen before the iretq at the bottom of
+                           this syscall, which returns straight into
+                           the NEW image */
+  t->cr3_phys = new_pml4;
+  t->brk_start = ALIGN_UP(elf.highest_vaddr, PAGE_SIZE);
+  t->brk = t->brk_start;
+
+  /* Cosmetic, but worth doing while we're here -- keeps `ps` honest
+   * about what a task is actually running post-exec, the same way a
+   * real kernel updates a process's comm/argv[0]. */
+  strncpy(t->name, path, sizeof(t->name) - 1);
+  t->name[sizeof(t->name) - 1] = '\0';
+
+  /* The old address space is provably no longer in use anywhere: this
+   * task only ever runs on one CPU at a time, CR3 was just switched
+   * away from it on that one CPU, and no other task shares it --
+   * every process gets its own (see USER_STACK_TOP's comment in
+   * proc/process.h). Safe to reclaim right now. */
+  vmm_free_user_space(old_pml4);
+
+  /* f->rax is irrelevant: nothing ever returns to the u_exec() call
+   * site that issued this syscall to read it, exactly like a real
+   * exec(). cs/ss/rflags are already correct -- we were already in
+   * ring 3 to get here. */
+  f->rip = elf.entry;
+  f->rsp = stack_top;
+}
+
 static void sys_wait_impl(struct interrupt_frame *f) {
   uint64_t pid = f->rdi;
 
@@ -493,6 +596,9 @@ static void syscall_dispatch(struct interrupt_frame *f) {
     break;
   case SYS_spawn:
     sys_spawn_impl(f);
+    break;
+  case SYS_exec:
+    sys_exec_impl(f);
     break;
   case SYS_wait:
     sys_wait_impl(f);

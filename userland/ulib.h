@@ -37,6 +37,14 @@ char *u_strncpy(char *dst, const char *src, size_t n);
 int u_spawn(const char *path); /* -> pid, or -1 */
 int u_wait(int pid);           /* -> exit code, or -1 */
 
+/* Replaces the calling process's own image with the ELF at `path`, in
+ * place: same pid, same open fds, fresh address space and entry
+ * point (see abi/syscall_nr.h's SYS_exec). Never returns on success --
+ * there's no call site left to return to, exactly like a real
+ * exec(). Returns -1 on failure, in which case the caller's current
+ * image is left completely untouched. */
+int u_exec(const char *path);
+
 /* Filesystem -- thin wrappers over SYS_open/SYS_read/SYS_close/
  * SYS_readdir. `flags` for u_open() matches abi/syscall_nr.h's
  * O_RDONLY etc. O_CREAT creates a missing file (see

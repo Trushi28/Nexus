@@ -99,6 +99,8 @@ int u_open(const char *path, int flags) {
   return (int)SC2(SYS_open, path, flags);
 }
 
+int u_exec(const char *path) { return (int)SC1(SYS_exec, path); }
+
 int u_read(int fd, void *buf, size_t len) {
   return (int)SC3(SYS_read, fd, buf, len);
 }
