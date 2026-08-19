@@ -4,6 +4,7 @@
 #include "cpu/isr.h"
 #include "cpu/vectors.h"
 #include "debug/log.h"
+#include "drivers/blockdev.h"
 #include "drivers/pci.h"
 #include "klib/klib.h"
 #include "mm/pmm.h"
@@ -291,6 +292,13 @@ static void nvme_io_irq_handler(struct interrupt_frame *frame) {
   wait_queue_wake(&g_nvme.io_q.irq_wq);
 }
 
+static const struct blockdev_ops nvme_blockdev_ops = {
+    .sector_count = nvme_sector_count,
+    .sector_size = nvme_sector_size,
+    .read = nvme_read,
+    .write = nvme_write,
+};
+
 bool nvme_init(void) {
   pci_scan();
 
@@ -384,6 +392,17 @@ bool nvme_init(void) {
   kprintf(
       "[nvme] ready: %lu sectors x %u bytes, admin depth %u, I/O depth %u\n",
       g_nvme.sector_count, g_nvme.sector_size, admin_depth, io_depth);
+
+  blockdev_register("nvme", &nvme_blockdev_ops); /* logs its own outcome;
+                                                      a false return here
+                                                      just means something
+                                                      else already claimed
+                                                      the slot -- NVMe
+                                                      itself is still
+                                                      fully usable via its
+                                                      own nvme_*() API
+                                                      either way (see
+                                                      nvmeinfo) */
   return true;
 }
 

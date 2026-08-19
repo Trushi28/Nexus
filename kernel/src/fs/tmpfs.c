@@ -48,6 +48,13 @@ struct vnode *tmpfs_create_root(void) {
 }
 
 static struct vnode *tmpfs_lookup(struct vnode *dir, const char *name) {
+    if (dir->type != VNODE_DIR) {
+        return NULL; /* tmpfs files never have children -- enforced here,
+                        not by a caller-side type check, now that walk()
+                        (fs/vfs.c) no longer gates on vnode->type itself
+                        (a graph node's type can change as edges come and
+                        go; tmpfs's can't, so it still has to say so). */
+    }
     struct tmpfs_node *d = dir->fs_data;
     for (struct tmpfs_node *c = d->children; c != NULL; c = c->next) {
         if (strcmp(c->vnode.name, name) == 0) {
@@ -58,6 +65,9 @@ static struct vnode *tmpfs_lookup(struct vnode *dir, const char *name) {
 }
 
 static struct vnode *tmpfs_create(struct vnode *dir, const char *name, enum vnode_type type) {
+    if (dir->type != VNODE_DIR) {
+        return NULL;
+    }
     struct tmpfs_node *d = dir->fs_data;
     struct tmpfs_node *n = tmpfs_alloc(name, type);
     if (n == NULL) {

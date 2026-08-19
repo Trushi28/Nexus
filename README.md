@@ -85,14 +85,19 @@ GNUmakefile    top-level build: fetches Limine, builds everything, packs the ima
 
 - `fork` / `exec`
 - Slab allocator
-- VFS mount table
 - Block device driver (virtio-blk)
-- Enforce `O_RDONLY`/`O_WRONLY` on open file descriptors (currently accepted but not checked)
 
 Already shipped, despite older notes to the contrary: real `copy_from_user`/
 `copy_to_user` with page-fault recovery (`cpu/usercopy.c`), background jobs
-(`run <path> &`, `jobs`, `kill`) in both shells, and an MSI-X-driven (not
-polled) NVMe driver.
+(`run <path> &`, `jobs`, `kill`) in both shells, an MSI-X-driven (not
+polled) NVMe driver, `O_RDONLY`/`O_WRONLY` enforcement on open file
+descriptors, a generic VFS mount table (`vfs_mount()`/`vfs_unmount()` --
+currently unused, since the graph filesystem uses the separate, simpler
+`vfs_set_root_fallback()` instead; ready for whenever a second real
+mountable filesystem shows up), and the graph filesystem grafted
+transparently into the classic path namespace (`sstring photos <node>`
+makes `/photos` work like any other top-level path -- see
+`fs/graphfs_vfs.c`).
 
 For the design rationale behind specific choices and how this has been
 tested, see [docs/DESIGN.md](docs/DESIGN.md).

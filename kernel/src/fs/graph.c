@@ -1,7 +1,7 @@
 #include "fs/graph.h"
 #include "boot/requests.h"
 #include "debug/log.h"
-#include "drivers/nvme.h"
+#include "drivers/blockdev.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "sched/sched.h"
@@ -1017,16 +1017,17 @@ static bool deserialize_graph(const uint8_t *buf, size_t len) {
 /* ------------------------------ disk gate -------------------------------
  * Serializes graph_save_to_disk()/graph_load_from_disk() against each
  * other. graph_lock isn't enough here -- that only covers the brief
- * in-memory critical section; this has to span an actual NVMe
- * round-trip (nvme_read()/nvme_write() -> submit_and_wait() ->
- * task_block()), which SLEEPS. Can't be a spinlock: holding one
- * across a blocking call leaves interrupts off on this cpu for as
- * long as the disk takes to answer.
+ * in-memory critical section; this has to span an actual block-device
+ * round-trip (blockdev_read()/blockdev_write() -> whatever the active
+ * driver's own submit-and-wait looks like, e.g. drivers/nvme.c's
+ * submit_and_wait() -> task_block()), which SLEEPS. Can't be a
+ * spinlock: holding one across a blocking call leaves interrupts off
+ * on this cpu for as long as the disk takes to answer.
  *
  * Before the autosave task existed, every caller here was serialized
  * by pure circumstance -- gsync/gload/reboot-save are all shell
- * commands, and there's only ever one shell task. drivers/nvme.c's
- * submit_and_wait() has NO locking of its own: struct
+ * commands, and there's only ever one shell task. Today's only
+ * registered driver, drivers/nvme.c, has NO locking of its own: struct
  * nvme_queue::irq_wq is a single-slot wait_queue, so two overlapping
  * callers means the second's wait_queue_register() silently
  * overwrites the first's, and the first never gets woken -- a
@@ -1056,8 +1057,8 @@ static void disk_op_unlock(void) {
 }
 
 bool graph_save_to_disk(void) {
-  if (!nvme_available()) {
-    kprintf("[graph] no NVMe controller available -- can't save\n");
+  if (!blockdev_available()) {
+    kprintf("[graph] no block device available -- can't save\n");
     return false;
   }
 
@@ -1101,7 +1102,7 @@ bool graph_save_to_disk(void) {
   }
 
   uint64_t payload_bytes = sink.written;
-  uint32_t sector_size = nvme_sector_size();
+  uint32_t sector_size = blockdev_sector_size();
   uint32_t payload_sectors = (uint32_t)DIV_ROUND_UP(payload_bytes, sector_size);
 
   uint64_t sb_phys = pmm_alloc_page();
@@ -1121,8 +1122,8 @@ bool graph_save_to_disk(void) {
   sb->payload_bytes = payload_bytes;
   sb->next_node_id = saved_next_id;
 
-  bool ok = nvme_write(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf) &&
-            nvme_write(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb);
+  bool ok = blockdev_write(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf) &&
+            blockdev_write(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb);
 
   pmm_free_pages(payload_phys, buf_pages);
   pmm_free_page(sb_phys);
@@ -1140,8 +1141,8 @@ bool graph_save_to_disk(void) {
 }
 
 bool graph_load_from_disk(void) {
-  if (!nvme_available()) {
-    kprintf("[graph] no NVMe controller available -- can't load\n");
+  if (!blockdev_available()) {
+    kprintf("[graph] no block device available -- can't load\n");
     return false;
   }
   if (registry_head != NULL) {
@@ -1161,7 +1162,7 @@ bool graph_load_from_disk(void) {
   struct graph_disk_superblock *sb =
       (struct graph_disk_superblock *)phys_to_virt(sb_phys);
 
-  if (!nvme_read(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb)) {
+  if (!blockdev_read(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb)) {
     kprintf("[graph] failed reading the superblock\n");
     pmm_free_page(sb_phys);
     disk_op_unlock();
@@ -1196,7 +1197,7 @@ bool graph_load_from_disk(void) {
   uint64_t saved_next_id = sb->next_node_id;
   pmm_free_page(sb_phys);
 
-  uint32_t sector_size = nvme_sector_size();
+  uint32_t sector_size = blockdev_sector_size();
   uint32_t payload_sectors = (uint32_t)DIV_ROUND_UP(payload_bytes, sector_size);
   uint64_t buf_pages =
       DIV_ROUND_UP((uint64_t)payload_sectors * sector_size, PAGE_SIZE);
@@ -1210,7 +1211,7 @@ bool graph_load_from_disk(void) {
   }
   uint8_t *payload_buf = (uint8_t *)phys_to_virt(payload_phys);
 
-  if (!nvme_read(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf)) {
+  if (!blockdev_read(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf)) {
     kprintf("[graph] failed reading the saved graph payload\n");
     pmm_free_pages(payload_phys, buf_pages);
     disk_op_unlock();

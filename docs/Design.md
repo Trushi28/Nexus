@@ -167,15 +167,16 @@ been verified and what's honestly still missing. See the main
 - The framebuffer is mapped write-back (not write-combining) in the
   direct map, for the same reason — simplicity over the last bit of
   fill-rate performance.
-- `open()`'s `flags` are only partially enforced: `O_CREAT` creates a
-  missing file and `O_TRUNC` truncates an existing one, but
-  `O_RDONLY`/`O_WRONLY`/`O_RDWR` are accepted and otherwise ignored —
-  any open fd can currently be read and written regardless of what it
-  was opened with. `vfs_file` would need to carry its open flags and
-  `sys_read_impl`/`sys_write_impl` would need to check them.
-- tmpfs is the only filesystem; there's no mount table yet, just a
-  single root vnode — though the vnode_ops indirection is exactly what
-  a mount table would dispatch through.
+- `open()`'s `O_RDWR`/`O_WRONLY`/`O_RDONLY` are enforced (`struct vfs_file`
+  carries the flags it was opened with; `sys_read_impl`/`sys_write_impl`
+  check them) — no `O_APPEND` yet, and no permission/ownership model at
+  all (single-user kernel, no concept of "whose" a file is).
+- tmpfs is still the only *real* on-disk-shaped filesystem, but it's no
+  longer the only thing in the namespace: `vfs_mount()`/`vfs_unmount()`
+  is a real, if currently unexercised, mount table (nothing else has
+  needed a second mounted filesystem yet), and the graph filesystem is
+  grafted in separately via `vfs_set_root_fallback()` — see
+  `fs/graphfs_vfs.c` and its own design note below.
 - The ELF loader only accepts static, non-PIE `ET_EXEC` binaries — no
   dynamic linking, no relocations, no PIE.
 - The NVMe driver is single-namespace, single-I/O-queue, and caps a

@@ -201,7 +201,18 @@ static struct vnode *walk(const char *path, bool create_missing,
     bool is_last = (i == depth - 1);
     bool at_primary_root = (i == 0 && cur == root_node);
 
-    if (cur->type != VNODE_DIR || cur->ops->lookup == NULL) {
+    if (cur->ops->lookup == NULL) {
+      /* Every filesystem's own .lookup (tmpfs_lookup(), graphfs_*_lookup())
+       * is responsible for refusing descent into what it considers a
+       * plain file -- deliberately NOT enforced here via cur->type,
+       * since that's fixed-at-creation for tmpfs but genuinely dynamic
+       * for a graph node (gains/loses VNODE_DIR-ness as edges come and
+       * go -- see fs/graphfs_vfs.c's header comment). A blanket check
+       * here would either wrongly block attaching a new child to an
+       * existing, currently-childless graph node, or (if loosened
+       * instead) wrongly allow creating a child inside what's
+       * semantically a tmpfs file. Pushing the decision down to each
+       * filesystem's own ops is the only way to get both right. */
       return NULL;
     }
 
