@@ -175,6 +175,22 @@ static uint32_t collect_cycles_locked(void) {
     }
   }
 
+  /* A node with an open classic-VFS fd is a root too, exactly like an
+   * sstring anchor -- ordinary refcounting (graph_node_retain(), via
+   * grm/gunlink/sstringrm's "refcount==0" checks) already stops those
+   * three from freeing a held-open node, but THIS scan doesn't
+   * consult refcount at all -- it rebuilds reachability from scratch
+   * every time, so without this a node reachable only through an open
+   * fd (no anchor, no incoming edge) would look exactly like an
+   * unreachable cycle and get swept anyway, leaving that fd dangling. */
+  for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
+    if (n->vfs_open_count > 0 && !n->gc_marked) {
+      n->gc_marked = true;
+      n->release_next = worklist;
+      worklist = n;
+    }
+  }
+
   while (worklist != NULL) {
     struct gnode *n = worklist;
     worklist = n->release_next;
@@ -401,9 +417,11 @@ void graph_clear_all(void) {
   if (remaining == 0) {
     kprintf("[graph] cleared -- freed %u node(s)\n", freed);
   } else {
-    kprintf("[graph] cleared -- freed %u node(s), %u node(s) unexpectedly "
-            "remain (this points at a bug in collect_cycles_locked(), "
-            "not a cyclic leftover -- please report it)\n",
+    kprintf("[graph] cleared -- freed %u node(s), %u node(s) still held "
+            "open by a classic-VFS fd (see fs/graphfs_vfs.c) survive and "
+            "will free once closed -- if nothing has anything open right "
+            "now, that instead points at a bug in collect_cycles_locked(), "
+            "please report it\n",
             freed, remaining);
   }
 }
@@ -486,6 +504,46 @@ size_t graph_write(struct gnode *n, uint64_t offset, const void *buf,
   spinlock_release_irqrestore(&graph_lock, f);
   graph_mark_dirty();
   return len;
+}
+
+void graph_truncate(struct gnode *n) {
+  uint64_t f = spinlock_acquire_irqsave(&graph_lock);
+  n->size = 0;
+  spinlock_release_irqrestore(&graph_lock, f);
+  graph_mark_dirty();
+}
+
+void graph_node_snapshot(struct gnode *n, uint64_t *size_out,
+                         uint32_t *edge_count_out) {
+  uint64_t f = spinlock_acquire_irqsave(&graph_lock);
+  if (size_out != NULL) {
+    *size_out = n->size;
+  }
+  if (edge_count_out != NULL) {
+    *edge_count_out = n->edge_count;
+  }
+  spinlock_release_irqrestore(&graph_lock, f);
+}
+
+void graph_node_retain(struct gnode *n) {
+  uint64_t f = spinlock_acquire_irqsave(&graph_lock);
+  n->refcount++;
+  n->vfs_open_count++;
+  spinlock_release_irqrestore(&graph_lock, f);
+}
+
+void graph_node_release(struct gnode *n) {
+  uint64_t f = spinlock_acquire_irqsave(&graph_lock);
+  n->vfs_open_count--;
+  n->refcount--;
+  uint32_t freed = 0;
+  if (n->refcount == 0) {
+    freed = release_cascade_locked(n);
+  }
+  spinlock_release_irqrestore(&graph_lock, f);
+  if (freed > 0) {
+    graph_mark_dirty();
+  }
 }
 
 struct gnode *graph_find_by_id(uint64_t id) {

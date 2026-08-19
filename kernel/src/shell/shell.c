@@ -1,4 +1,5 @@
 #include "shell/shell.h"
+#include "abi/syscall_nr.h"
 #include "apic/lapic.h"
 #include "boot/requests.h"
 #include "cpu/cpu.h"
@@ -707,7 +708,7 @@ static void cmd_cat(const char *args) {
     return;
   }
   struct vfs_file *f;
-  if (!vfs_open(args, false, &f)) {
+  if (!vfs_open(args, O_RDONLY, &f)) {
     kprintf("cat: %s: no such file\n", args);
     return;
   }
@@ -1117,7 +1118,8 @@ static void cmd_gnodeinfo(const char *args) {
   kprintf("label:    %s\n", n->label[0] ? n->label : "(none)");
   kprintf("size:     %lu byte(s)\n", n->size);
   kprintf("edges:    %u\n", n->edge_count);
-  kprintf("refcount: %u (incoming edges + sstring anchors)\n", n->refcount);
+  kprintf("refcount: %u (incoming edges + sstring anchors + open fds)\n",
+          n->refcount);
 }
 
 static void gnode_print_one(struct gnode *n, void *arg) {

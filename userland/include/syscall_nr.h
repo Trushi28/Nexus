@@ -44,6 +44,7 @@
 #define O_RDONLY 0x0
 #define O_WRONLY 0x1
 #define O_RDWR   0x2
+#define O_ACCMODE 0x3 /* mask isolating RDONLY/WRONLY/RDWR from CREAT/TRUNC */
 #define O_CREAT  0x4
 #define O_TRUNC  0x8
 

@@ -2,6 +2,7 @@
 #define NEXUS_GRAPH_H
 
 #include "klib/klib.h"
+#include "fs/vfs.h"
 
 #define GNODE_LABEL_MAX 64
 #define GEDGE_NAME_MAX 64
@@ -39,6 +40,32 @@ struct gnode {
                                   meaning outside of an active cascade. */
   bool gc_marked;
   struct gnode *reg_next;
+
+  uint32_t vfs_open_count; /* how many open classic-VFS fds
+                               (fs/graphfs_vfs.c) currently hold this
+                               node -- bumped by graph_node_retain()/
+                               graph_node_release(), which also bump
+                               the ordinary `refcount` above, so
+                               grm/gunlink/sstringrm's existing
+                               "refcount==0" checks already refuse to
+                               free a node an open fd is using.
+                               vfs_open_count exists on top of that
+                               purely so collect_cycles_locked()'s
+                               mark-and-sweep -- which does its own
+                               from-scratch reachability scan and
+                               never consults refcount at all -- knows
+                               to treat a held-open node as a GC root
+                               too, the same way an sstring anchor is
+                               one. */
+
+  struct vnode vfs_node; /* embedded classic-VFS adapter for this node
+                             (see fs/graphfs_vfs.c) -- re-populated
+                             fresh on every access through that
+                             adapter, same trick tmpfs_node uses for
+                             its own embedded vnode. Owned by this
+                             allocation: freeing the gnode frees this
+                             along with it, no separate teardown
+                             needed. */
 };
 
 void graph_init(void);
@@ -60,6 +87,34 @@ bool graph_list_edges(struct gnode *from, uint32_t index, char *name_out,
 size_t graph_read(struct gnode *n, uint64_t offset, void *buf, size_t len);
 size_t graph_write(struct gnode *n, uint64_t offset, const void *buf,
                    size_t len);
+
+/* Resets a node's logical length to 0 -- same effect O_TRUNC has on a
+ * classic file. The backing allocation (data/capacity) is left in
+ * place, exactly like tmpfs_truncate()'s equivalent tradeoff, so a
+ * later write reuses it instead of paying to free and reallocate. */
+void graph_truncate(struct gnode *n);
+
+/* Locked read of a node's current size and edge_count, for callers
+ * outside graph.c (fs/graphfs_vfs.c) that need a consistent snapshot
+ * of both without reaching into struct gnode directly and racing
+ * graph_lock-protected mutations. Either output pointer may be NULL
+ * if you only want the other. */
+void graph_node_snapshot(struct gnode *n, uint64_t *size_out,
+                         uint32_t *edge_count_out);
+
+/* Takes/releases an external (classic-VFS) reference on a node --
+ * called from fs/graphfs_vfs.c's open/close hooks, one retain per
+ * successful vfs_open(), one release per matching vfs_close(). Makes
+ * an open fd count exactly like an edge or sstring anchor for
+ * refcount-based freeing (grm/gunlink/sstringrm already refuse a
+ * nonzero-refcount node), and additionally marks the node as a GC
+ * root for collect_cycles_locked(), which doesn't consult refcount at
+ * all. graph_node_release() may free the node (same as any other
+ * refcount hitting 0) if this was its last reference of any kind --
+ * don't touch `n` again after calling it unless you independently
+ * know something else still references it. */
+void graph_node_retain(struct gnode *n);
+void graph_node_release(struct gnode *n);
 
 struct gnode *graph_resolve(const char *path);
 struct gnode *graph_touch(const char *path, bool *out_created);

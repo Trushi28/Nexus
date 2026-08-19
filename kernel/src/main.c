@@ -13,6 +13,7 @@
 #include "drivers/keyboard.h"
 #include "drivers/nvme.h"
 #include "fs/graph.h"
+#include "fs/graphfs_vfs.h"
 #include "fs/initrd.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
@@ -142,6 +143,22 @@ NORETURN void kmain(void) {
   } else {
     kprintf("[boot] no initrd module found -- '/' will be empty\n");
   }
+
+  /* From here on, any top-level name that isn't a real tmpfs entry
+   * falls through to the graph filesystem: `sstring photos <node>`
+   * makes "photos" work as an ordinary top-level path immediately
+   * (ls, cat, run, ring-3's open() with O_CREAT/O_TRUNC -- all of
+   * it), and a brand-new top-level name created through open(O_CREAT)
+   * becomes a new graph node auto-anchored under that same name -- no
+   * separate mount point, no /graph prefix. Deliberately registered
+   * only NOW, after the initrd is already unpacked: vfs_set_root_fallback()
+   * makes every *subsequent* top-level create prefer the graph over
+   * tmpfs (see fs/vfs.c's walk()), and initrd_unpack()'s own
+   * vfs_lookup_or_create() calls for "bin" etc. are top-level creates
+   * too -- registering the fallback any earlier would silently pull
+   * the whole initrd into the graph instead of tmpfs. See
+   * fs/graphfs_vfs.c for the adapter itself. */
+  vfs_set_root_fallback(graphfs_vfs_root());
 
   timer_calibrate();
 

@@ -1,4 +1,5 @@
 #include "proc/process.h"
+#include "abi/syscall_nr.h"
 #include "debug/log.h"
 #include "fs/vfs.h"
 #include "mm/heap.h"
@@ -9,7 +10,7 @@
 
 struct task *process_spawn(const char *path, const char *name) {
   struct vfs_file *file;
-  if (!vfs_open(path, false, &file)) {
+  if (!vfs_open(path, O_RDONLY, &file)) {
     kprintf("run: %s: no such file\n", path);
     return NULL;
   }

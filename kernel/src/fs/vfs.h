@@ -7,10 +7,11 @@
  * A small, generic virtual filesystem layer: a vnode tree with a
  * per-node operations table, so any concrete filesystem (today, just
  * fs/tmpfs.c) can plug in without the rest of the kernel caring how a
- * given file is actually stored. v1 mounts exactly one filesystem at
- * "/" -- there's no mount table yet, just a single root pointer -- but
- * the vnode_ops indirection is what a real mount table would dispatch
- * through, so adding one later doesn't mean redesigning this.
+ * given file is actually stored. The primary root ("/") is set once
+ * via vfs_set_root(); additional filesystems can be grafted in at any
+ * path with vfs_mount() (see below) -- resolution picks the longest
+ * matching mount prefix, same idea as a real Unix mount table, just
+ * without the ability to unmount something still busy.
  */
 
 enum vnode_type {
@@ -52,6 +53,19 @@ struct vnode_ops {
    * without one today, but the pointer is still checked rather than
    * assumed, the same way every other optional op here is). */
   bool (*truncate)(struct vnode *node);
+
+  /* Optional lifecycle hooks, not I/O: called once when a vfs_file is
+   * created for this vnode (a successful vfs_open()) and once when
+   * that vfs_file is closed (vfs_close()). NULL for filesystems
+   * (tmpfs) that don't need per-open bookkeeping, since a tmpfs
+   * node's lifetime isn't reclaimed while it's still reachable from
+   * the tree anyway. Graph nodes (fs/graphfs_vfs.c) ARE reclaimed out
+   * from under a path the moment their graph-level refcount hits
+   * zero -- these hooks are how an open fd counts as one more such
+   * reference, so grm/gunlink/ggc/gclear can't free a node a
+   * classic-VFS handle is still using underneath it. */
+  void (*open)(struct vnode *node);
+  void (*close)(struct vnode *node);
 };
 
 struct vnode {
@@ -65,12 +79,48 @@ struct vnode {
 struct vfs_file {
   struct vnode *node;
   uint64_t offset;
+  int flags; /* the O_* flags (abi/syscall_nr.h) this was opened with --
+                O_RDONLY/O_WRONLY/O_RDWR is all cpu/syscall.c's
+                sys_read_impl()/sys_write_impl() actually check today. */
 };
 
 /* Installs `root` as the single mounted root ("/"). Call once at boot
  * before anything tries to open a path. */
 void vfs_set_root(struct vnode *root);
 struct vnode *vfs_root(void);
+
+#define VFS_MAX_MOUNTS 8
+#define VFS_MOUNT_MAX_DEPTH 4
+
+/* Grafts `root` into the namespace at `path` (e.g. "/mnt/data"), so
+ * any lookup under it resolves through `root` instead of the primary
+ * root. The longest matching mount prefix wins if more than one could
+ * apply. `path` itself is NOT auto-created as a directory in the
+ * parent filesystem -- create it first (vfs_lookup_or_create()) if
+ * you want it to show up in a readdir() of its parent, the same way a
+ * real mount point is an ordinary directory until something's
+ * mounted on it. Returns false if the mount table is full, `path` is
+ * "/" itself (use vfs_set_root() for that) or too deep for
+ * VFS_MOUNT_MAX_DEPTH components, or something is already mounted at
+ * exactly that path. */
+bool vfs_mount(const char *path, struct vnode *root);
+
+/* Removes a mount previously installed at exactly `path`. Returns
+ * false if nothing is mounted there. Doesn't touch anything mounted
+ * *under* it -- unmount those first. */
+bool vfs_unmount(const char *path);
+
+/* Registers `fallback` as a second, transparent root: consulted, at
+ * the TOP level only (a single path component directly under "/"),
+ * whenever the primary root's own lookup/create doesn't have the
+ * name -- no path prefix involved, unlike vfs_mount(). This is how
+ * fs/graphfs_vfs.c's sstring-anchored graph nodes show up as ordinary
+ * top-level entries (e.g. "photos") right alongside tmpfs's own,
+ * rather than needing a dedicated mount point. Pass NULL to disable.
+ * Entirely generic on this end -- vfs.c never assumes the fallback is
+ * graphfs specifically, it just dispatches through vnode_ops like any
+ * other vnode. */
+void vfs_set_root_fallback(struct vnode *fallback);
 
 /* Resolves an absolute, '/'-separated path to a vnode ("/" or ""
  * itself resolves to the root). Returns NULL if any path component is
@@ -83,7 +133,13 @@ struct vnode *vfs_lookup_path(const char *path);
  * `type`. The "mkdir -p" primitive the initrd unpacker uses. */
 struct vnode *vfs_lookup_or_create(const char *path, enum vnode_type type);
 
-bool vfs_open(const char *path, bool create, struct vfs_file **out);
+/* `flags` is the same O_* bitfield as abi/syscall_nr.h's open() --
+ * O_CREAT creates a missing file, O_RDONLY/O_WRONLY/O_RDWR (extract
+ * with `flags & O_ACCMODE`) is recorded on the resulting vfs_file for
+ * later enforcement, and any other bit (O_TRUNC included) is stored
+ * but otherwise ignored by vfs_open() itself -- see vfs_truncate()
+ * for that one, called separately after open by whoever wants it. */
+bool vfs_open(const char *path, int flags, struct vfs_file **out);
 void vfs_close(struct vfs_file *f);
 size_t vfs_read(struct vfs_file *f, void *buf, size_t len);
 size_t vfs_write(struct vfs_file *f, const void *buf, size_t len);

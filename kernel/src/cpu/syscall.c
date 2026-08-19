@@ -55,6 +55,21 @@ static void sys_exit_impl(struct interrupt_frame *f) {
   task_exit(); /* never returns */
 }
 
+/* O_RDONLY/O_WRONLY/O_RDWR checks against how a given fd was actually
+ * opened (struct vfs_file::flags, set by vfs_open()). STDIN/STDOUT/
+ * STDERR never reach these -- sys_read_impl()/sys_write_impl() both
+ * special-case those three before ever touching t->fds[], same as
+ * before this existed. */
+static bool fd_readable(struct vfs_file *file) {
+  int mode = file->flags & O_ACCMODE;
+  return mode == O_RDONLY || mode == O_RDWR;
+}
+
+static bool fd_writable(struct vfs_file *file) {
+  int mode = file->flags & O_ACCMODE;
+  return mode == O_WRONLY || mode == O_RDWR;
+}
+
 static void sys_write_impl(struct interrupt_frame *f) {
   int fd = (int)f->rdi;
   uint64_t buf = f->rsi;
@@ -85,6 +100,10 @@ static void sys_write_impl(struct interrupt_frame *f) {
   struct task *t = this_cpu()->current_task;
   if (fd < 0 || fd >= PROC_MAX_FDS || t->fds[fd] == NULL) {
     f->rax = (uint64_t)-1;
+    return;
+  }
+  if (!fd_writable(t->fds[fd])) {
+    f->rax = (uint64_t)-1; /* opened O_RDONLY -- not ours to write */
     return;
   }
 
@@ -150,6 +169,10 @@ static void sys_read_impl(struct interrupt_frame *f) {
     f->rax = (uint64_t)-1;
     return;
   }
+  if (!fd_readable(t->fds[fd])) {
+    f->rax = (uint64_t)-1; /* opened O_WRONLY -- not ours to read */
+    return;
+  }
 
   char chunk[128];
   uint64_t done = 0;
@@ -194,10 +217,19 @@ static void sys_open_impl(struct interrupt_frame *f) {
     return;
   }
 
-  bool create = (flags & O_CREAT) != 0;
-
   struct vfs_file *file;
-  if (!vfs_open(path, create, &file)) {
+  if (!vfs_open(path, flags, &file)) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  if ((flags & O_TRUNC) != 0 && !vfs_truncate(file)) {
+    /* Asked for O_TRUNC but the filesystem behind this path can't
+     * do it (no writable filesystem exists in v1 besides tmpfs, so
+     * this is unreachable today -- kept as a real check, not an
+     * assert, so a future read-only mount fails the open cleanly
+     * instead of silently ignoring the flag). */
+    vfs_close(file);
     f->rax = (uint64_t)-1;
     return;
   }
