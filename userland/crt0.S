@@ -8,4 +8,13 @@ _start:
     int $0x80
 1:  jmp 1b               /* unreachable: exit() never returns */
 
+.global _split_trampoline
+_split_trampoline:
+    xor %rbp, %rbp
+    call *%rsi
+    mov $0, %edi
+    mov $0, %eax
+    int $0x80
+1:  jmp 1b
+
 .section .note.GNU-stack, "", @progbits

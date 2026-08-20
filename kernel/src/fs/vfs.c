@@ -301,6 +301,20 @@ void vfs_close(struct vfs_file *f) {
   kfree(f);
 }
 
+struct vfs_file *vfs_dup(struct vfs_file *f) {
+  struct vfs_file *nf = kzalloc(sizeof(struct vfs_file));
+  if (nf == NULL) {
+    return NULL;
+  }
+  nf->node = f->node;
+  nf->offset = f->offset;
+  nf->flags = f->flags;
+  if (nf->node->ops->open != NULL) {
+    nf->node->ops->open(nf->node);
+  }
+  return nf;
+}
+
 size_t vfs_read(struct vfs_file *f, void *buf, size_t len) {
   if (f->node->ops->read == NULL) {
     return 0;

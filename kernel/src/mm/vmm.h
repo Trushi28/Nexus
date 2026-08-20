@@ -3,12 +3,12 @@
 
 #include "klib/klib.h"
 
-#define VMM_PRESENT   (1ULL << 0)
-#define VMM_WRITABLE  (1ULL << 1)
-#define VMM_USER      (1ULL << 2)
-#define VMM_PWT       (1ULL << 3)
-#define VMM_PCD       (1ULL << 4)
-#define VMM_NX        (1ULL << 63)
+#define VMM_PRESENT (1ULL << 0)
+#define VMM_WRITABLE (1ULL << 1)
+#define VMM_USER (1ULL << 2)
+#define VMM_PWT (1ULL << 3)
+#define VMM_PCD (1ULL << 4)
+#define VMM_NX (1ULL << 63)
 
 /* Builds Nexus's own kernel page tables (direct map covering all of
  * physical memory + the kernel image mapped with correct W^X
@@ -17,7 +17,7 @@
 void vmm_init(void);
 
 uint64_t vmm_kernel_pml4_phys(void);
-void     vmm_load_kernel_pagemap(void);
+void vmm_load_kernel_pagemap(void);
 
 /* Maps a single 4KiB page. Allocates any missing intermediate page
  * tables from the PMM. `flags` is a combination of the VMM_* bits above
@@ -37,12 +37,30 @@ void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags);
  * Returns its physical address, or 0 on OOM. */
 uint64_t vmm_new_address_space(void);
 
+/* Deep-copies `src_pml4_phys`'s entire LOWER half (user space) into a
+ * brand new address space -- the kernel's own upper half is shared the
+ * same way vmm_new_address_space() already shares it (fresh copy of
+ * those PML4 entries, not the user pages beneath them). Every
+ * currently-mapped user page gets its own fresh physical frame with
+ * byte-identical contents and identical flags at the identical virtual
+ * address -- there's no copy-on-write here, this is a real, immediate,
+ * full copy (see docs/Design.md's note on why: correctness before
+ * optimization, same tradeoff this codebase makes everywhere else).
+ * Used by sys_split_impl() (cpu/syscall.c) to give a new task its own
+ * independent copy of the calling task's current memory image. Returns
+ * 0 on OOM partway through (having freed whatever it had already
+ * built -- never leaves a half-copied address space behind for the
+ * caller to clean up). */
+uint64_t vmm_copy_address_space(uint64_t src_pml4_phys);
+
 /* Like vmm_map_page()/vmm_map_range(), but targets an arbitrary address
  * space by physical PML4 address rather than the kernel's own. Safe to
  * call regardless of which CR3 is currently loaded -- page tables are
  * always walked through the direct map. */
-void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
-void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags);
+void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
+                     uint64_t flags);
+void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
+                      uint64_t size, uint64_t flags);
 
 /* Unmaps a single page (if one is mapped there -- a no-op otherwise)
  * from the given address space: clears the leaf PTE, invalidates it

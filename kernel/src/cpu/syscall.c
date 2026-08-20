@@ -481,6 +481,55 @@ static void sys_exec_impl(struct interrupt_frame *f) {
   f->rsp = stack_top;
 }
 
+static void sys_split_impl(struct interrupt_frame *f) {
+  uint64_t trampoline_va = f->rdi;
+  uint64_t entry_va = f->rsi;
+  uint64_t arg = f->rdx;
+
+  if (!user_range_ok(trampoline_va, 1) || !user_range_ok(entry_va, 1)) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct task *parent = this_cpu()->current_task;
+
+  uint64_t new_pml4 = vmm_copy_address_space(parent->cr3_phys);
+  if (new_pml4 == 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct task *child = task_create_user(parent->name, new_pml4, trampoline_va,
+                                        USER_STACK_TOP, arg, entry_va);
+  if (child == NULL) {
+    vmm_free_user_space(new_pml4);
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  child->brk_start = parent->brk_start;
+  child->brk = parent->brk;
+  child->parent = parent;
+  ksnprintf(child->name, sizeof(child->name), "%s~%lu", parent->name,
+            child->id);
+
+  for (int i = 0; i < PROC_MAX_FDS; i++) {
+    if (parent->fds[i] != NULL) {
+      child->fds[i] = vfs_dup(parent->fds[i]);
+      if (child->fds[i] == NULL) {
+        kprintf("[split] pid %lu: couldn't duplicate fd %d into new pid "
+                "%lu -- that fd starts closed there\n",
+                parent->id, i, child->id);
+      }
+    }
+  }
+
+  task_publish(child); /* only now that fds/brk/parent/name are fully
+                           set -- see task_publish()'s comment in
+                           sched.h */
+  f->rax = child->id;
+}
+
 static void sys_wait_impl(struct interrupt_frame *f) {
   uint64_t pid = f->rdi;
 
@@ -492,6 +541,37 @@ static void sys_wait_impl(struct interrupt_frame *f) {
 
   int code = sched_wait_task(child);
   f->rax = (uint64_t)(int64_t)code;
+}
+
+/* wait_any(): see sched_wait_any()'s own comment (sched/sched.h) for
+ * the full contract. `code_out_va == 0` (NULL) is explicitly allowed
+ * and means "the caller doesn't care about the exit code" -- the
+ * child is still reaped either way, only the code is skipped. */
+static void sys_wait_any_impl(struct interrupt_frame *f) {
+  uint64_t code_out_va = f->rdi;
+
+  if (code_out_va != 0 && !user_range_ok(code_out_va, sizeof(int))) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  int code = 0;
+  int64_t pid = sched_wait_any(&code);
+  if (pid < 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  if (code_out_va != 0 &&
+      copy_to_user((void *)code_out_va, &code, sizeof(code)) != 0) {
+    /* The child is already reaped by this point -- a bad pointer
+     * here loses the caller its exit code, not the reap itself.
+     * Same "the real work already happened" tradeoff sys_ps_impl()
+     * makes for its own copy_to_user() failure. */
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  f->rax = (uint64_t)pid;
 }
 
 static void sys_kill_impl(struct interrupt_frame *f) {
@@ -600,8 +680,14 @@ static void syscall_dispatch(struct interrupt_frame *f) {
   case SYS_exec:
     sys_exec_impl(f);
     break;
+  case SYS_split:
+    sys_split_impl(f);
+    break;
   case SYS_wait:
     sys_wait_impl(f);
+    break;
+  case SYS_wait_any:
+    sys_wait_any_impl(f);
     break;
   case SYS_ps:
     sys_ps_impl(f);

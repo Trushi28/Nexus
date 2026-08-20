@@ -36,8 +36,10 @@
 #define SYS_ps        13 /* ps(index, nx_task_info_t *out)                 -> 0, or -1 at EOF */
 #define SYS_kill      14 /* kill(pid)                                       -> 0, or -1 */
 #define SYS_exec      15 /* exec(path)                    -> never returns on success, -1 on failure */
+#define SYS_split     16 /* split(trampoline, entry, arg) -> child pid, or -1 */
+#define SYS_wait_any  17 /* wait_any(int *code_out)       -> pid of whichever child exited, or -1 if none left */
 
-#define SYS_COUNT     16
+#define SYS_COUNT     18
 
 /* open() flags -- deliberately tiny; no O_APPEND yet. */
 #define O_RDONLY 0x0

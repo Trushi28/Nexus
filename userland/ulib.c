@@ -99,7 +99,15 @@ int u_open(const char *path, int flags) {
   return (int)SC2(SYS_open, path, flags);
 }
 
+int u_wait_any(int *code_out) { return (int)SC1(SYS_wait_any, code_out); }
+
 int u_exec(const char *path) { return (int)SC1(SYS_exec, path); }
+
+extern void _split_trampoline(void); // crt0.S
+
+int u_split(u_task_entry_t entry, void *arg) {
+  return (int)SC3(SYS_split, (long)_split_trampoline, (long)entry, (long)arg);
+}
 
 int u_read(int fd, void *buf, size_t len) {
   return (int)SC3(SYS_read, fd, buf, len);

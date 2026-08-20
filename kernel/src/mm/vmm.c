@@ -48,7 +48,8 @@ static uint64_t *table_get_or_create(uint64_t *table, size_t index) {
  * process's) is being modified. table_get_or_create() is already
  * pml4-agnostic (it just walks whatever `table` it's handed), so this
  * is the only place that needed to grow a parameter. */
-static void map_page_in(uint64_t *pml4v, uint64_t virt, uint64_t phys, uint64_t flags) {
+static void map_page_in(uint64_t *pml4v, uint64_t virt, uint64_t phys,
+                        uint64_t flags) {
   size_t pml4_i = (virt >> 39) & 0x1FF;
   size_t pdpt_i = (virt >> 30) & 0x1FF;
   size_t pd_i = (virt >> 21) & 0x1FF;
@@ -66,7 +67,7 @@ static void map_page_in(uint64_t *pml4v, uint64_t virt, uint64_t phys, uint64_t 
 }
 
 static void map_range_in(uint64_t *pml4v, uint64_t virt, uint64_t phys,
-                          uint64_t size, uint64_t flags) {
+                         uint64_t size, uint64_t flags) {
   uint64_t start = ALIGN_DOWN(virt, PAGE_SIZE);
   uint64_t end = ALIGN_UP(virt + size, PAGE_SIZE);
   uint64_t off = 0;
@@ -80,16 +81,18 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
   map_page_in(pml4_virt, virt, phys, flags);
 }
 
-void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
+void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size,
+                   uint64_t flags) {
   map_range_in(pml4_virt, virt, phys, size, flags);
 }
 
-void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
+void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
+                     uint64_t flags) {
   map_page_in((uint64_t *)phys_to_virt(pml4_phys), virt, phys, flags);
 }
 
 void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
-                       uint64_t size, uint64_t flags) {
+                      uint64_t size, uint64_t flags) {
   map_range_in((uint64_t *)phys_to_virt(pml4_phys), virt, phys, size, flags);
 }
 
@@ -117,8 +120,7 @@ static void unmap_page_in(uint64_t *pml4v, uint64_t virt) {
   uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
 
   uint64_t *pdpt, *pd, *pt;
-  if (!table_lookup(pml4v, pml4_i, &pdpt) ||
-      !table_lookup(pdpt, pdpt_i, &pd) ||
+  if (!table_lookup(pml4v, pml4_i, &pdpt) || !table_lookup(pdpt, pdpt_i, &pd) ||
       !table_lookup(pd, pd_i, &pt)) {
     spinlock_release_irqrestore(&vmm_lock, f);
     return; /* nothing mapped along this path -- nothing to undo */
@@ -217,6 +219,67 @@ void vmm_free_user_space(uint64_t pml4_phys) {
   }
 
   pmm_free_page(pml4_phys);
+}
+
+uint64_t vmm_copy_address_space(uint64_t src_pml4_phys) {
+  uint64_t dst_pml4_phys = vmm_new_address_space();
+  if (dst_pml4_phys == 0) {
+    return 0;
+  }
+
+  uint64_t *src_pml4 = (uint64_t *)phys_to_virt(src_pml4_phys);
+
+  for (size_t i = 0; i < 256; i++) {
+    if (!(src_pml4[i] & VMM_PRESENT)) {
+      continue;
+    }
+    uint64_t *src_pdpt = (uint64_t *)phys_to_virt(src_pml4[i] & ADDR_MASK);
+
+    for (size_t j = 0; j < ENTRIES_PER_TABLE; j++) {
+      if (!(src_pdpt[j] & VMM_PRESENT)) {
+        continue;
+      }
+      uint64_t *src_pd = (uint64_t *)phys_to_virt(src_pdpt[j] & ADDR_MASK);
+
+      for (size_t k = 0; k < ENTRIES_PER_TABLE; k++) {
+        if (!(src_pd[k] & VMM_PRESENT)) {
+          continue;
+        }
+        uint64_t *src_pt = (uint64_t *)phys_to_virt(src_pd[k] & ADDR_MASK);
+
+        for (size_t l = 0; l < ENTRIES_PER_TABLE; l++) {
+          uint64_t entry = src_pt[l];
+          if (!(entry & VMM_PRESENT)) {
+            continue;
+          }
+
+          uint64_t src_phys = entry & ADDR_MASK;
+          /* Everything outside the physical-address field -- present,
+           * writable, user, PWT/PCD, NX -- carries over unchanged.
+           * Intermediate PDPT/PD/PT entries don't need this same
+           * treatment: table_get_or_create() (used internally by
+           * vmm_map_page_in() below) always builds them with the same
+           * fixed permissive flags every OTHER address space in this
+           * kernel already uses, since the leaf PTE is what actually
+           * enforces permissions -- see that function's own comment. */
+          uint64_t flags = entry & ~ADDR_MASK;
+
+          uint64_t new_phys = pmm_alloc_page();
+          if (new_phys == 0) {
+            vmm_free_user_space(dst_pml4_phys);
+            return 0;
+          }
+          memcpy(phys_to_virt(new_phys), phys_to_virt(src_phys), PAGE_SIZE);
+
+          uint64_t va = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
+                        ((uint64_t)k << 21) | ((uint64_t)l << 12);
+          vmm_map_page_in(dst_pml4_phys, va, new_phys, flags);
+        }
+      }
+    }
+  }
+
+  return dst_pml4_phys;
 }
 
 static void map_kernel_section(uint64_t start, uint64_t end, uint64_t flags) {

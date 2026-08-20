@@ -63,7 +63,8 @@ struct vnode_ops {
    * from under a path the moment their graph-level refcount hits
    * zero -- these hooks are how an open fd counts as one more such
    * reference, so grm/gunlink/ggc/gclear can't free a node a
-   * classic-VFS handle is still using underneath it. */
+   * classic-VFS handle is still using underneath it. vfs_dup() below
+   * relies on these too, for exactly the same reason. */
   void (*open)(struct vnode *node);
   void (*close)(struct vnode *node);
 };
@@ -141,14 +142,12 @@ struct vnode *vfs_lookup_or_create(const char *path, enum vnode_type type);
  * for that one, called separately after open by whoever wants it. */
 bool vfs_open(const char *path, int flags, struct vfs_file **out);
 void vfs_close(struct vfs_file *f);
+struct vfs_file *vfs_dup(struct vfs_file *f);
+
 size_t vfs_read(struct vfs_file *f, void *buf, size_t len);
 size_t vfs_write(struct vfs_file *f, const void *buf, size_t len);
 uint64_t vfs_file_size(struct vfs_file *f);
 
-/* Truncates an already-open file to zero length and resets `f`'s own
- * read/write offset back to 0 to match (an open fd's offset otherwise
- * has no way to notice the file shrank out from under it). Returns
- * false if the underlying filesystem doesn't support truncation. */
 bool vfs_truncate(struct vfs_file *f);
 
 /* Lists directory `path`'s `index`'th entry into `name_out` (a buffer

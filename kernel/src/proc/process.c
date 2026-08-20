@@ -58,7 +58,7 @@ struct task *process_spawn(const char *path, const char *name) {
     vmm_map_page_in(pml4, va, phys, VMM_WRITABLE | VMM_USER | VMM_NX);
   }
 
-  struct task *t = task_create_user(name, pml4, elf.entry, stack_top);
+  struct task *t = task_create_user(name, pml4, elf.entry, stack_top, 0, 0);
   if (t == NULL) {
     vmm_free_user_space(pml4);
     return NULL;
@@ -66,6 +66,8 @@ struct task *process_spawn(const char *path, const char *name) {
 
   t->brk_start = ALIGN_UP(elf.highest_vaddr, PAGE_SIZE);
   t->brk = t->brk_start;
+  task_publish(t); /* only now, with brk_start/brk already set -- see
+                       task_publish()'s comment in sched.h */
   return t;
 }
 

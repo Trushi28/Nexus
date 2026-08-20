@@ -26,9 +26,17 @@ static struct task *sleep_head;
 static spinlock_t sleep_lock = SPINLOCK_INIT;
 
 /* Guards the exit/wait rendezvous between task_exit() and
- * sched_wait_task() -- see the latter for why this needs to be a real
- * lock rather than the check-then-block idiom used elsewhere in this
- * file (e.g. wait_queue_block()/keyboard_getc()). */
+ * sched_wait_task()/sched_wait_any() (see the latter two for why this
+ * needs to be a real lock rather than the check-then-block idiom used
+ * elsewhere in this file, e.g. wait_queue_block()/keyboard_getc()).
+ * Also now the lock protecting struct task::parent and
+ * ::waiting_for_any_child (see orphan_children() and
+ * sched_wait_any()) -- registry_lock is ALWAYS acquired nested INSIDE
+ * a wait_lock hold whenever both are needed together, never the other
+ * order, anywhere in this file. That fixed direction is the only
+ * thing standing between this and an AB-BA deadlock the moment two
+ * cpus hit both paths at once; if you ever add a third place that
+ * needs both locks, keep the same order. */
 static spinlock_t wait_lock = SPINLOCK_INIT;
 
 /* Every currently-live task, kernel or user, idle or not -- used only
@@ -88,6 +96,43 @@ static void unregister_task(struct task *t) {
   spinlock_release_irqrestore(&registry_lock, f);
 }
 
+/* Called right before a task's struct is actually kfree()'d -- from
+ * sched_wait_task()'s reap, sched_wait_any()'s reap, and
+ * finish_task_exit()'s immediate-free path for non-waitable kernel
+ * tasks. Clears `parent` on any live task that still points at
+ * `dying`, so a later exit of one of THOSE tasks never dereferences
+ * freed memory reading it back (see finish_task_exit()'s wake-any
+ * check, and struct task::parent's own comment). Nexus has no init/
+ * reaper process to re-parent an orphan to -- it's simply left with
+ * parent == NULL from here on, silently ineligible for anyone's
+ * sched_wait_any() (its creator can still sched_wait_task() it
+ * directly, by pid, if something kept one around independent of the
+ * parent link -- e.g. shell.c's own jobs[] table already does exactly
+ * that).
+ *
+ * wait_lock held for the WHOLE walk (not re-acquired per entry) is
+ * what makes this airtight against finish_task_exit()'s own
+ * wait_lock-protected read of a child's `parent`: either this
+ * function's clearing pass fully completes before that read (so it
+ * sees NULL, no dereference), or the read happens first (so `dying`
+ * is still guaranteed allocated -- this function hasn't returned yet,
+ * and the caller doesn't kfree() `dying` until after it does). There
+ * is no interleaving where a reader sees a stale non-NULL pointer to
+ * already-freed memory. registry_lock nests INSIDE this wait_lock
+ * hold, for the same reason wait_lock is always outer everywhere in
+ * this file that both are needed. */
+static void orphan_children(struct task *dying) {
+  uint64_t wf = spinlock_acquire_irqsave(&wait_lock);
+  uint64_t rf = spinlock_acquire_irqsave(&registry_lock);
+  for (struct task *t = registry_head; t != NULL; t = t->reg_next) {
+    if (t->parent == dying) {
+      t->parent = NULL;
+    }
+  }
+  spinlock_release_irqrestore(&registry_lock, rf);
+  spinlock_release_irqrestore(&wait_lock, wf);
+}
+
 struct task *sched_find_waitable_task(uint64_t id) {
   uint64_t f = spinlock_acquire_irqsave(&registry_lock);
   struct task *result = NULL;
@@ -139,6 +184,13 @@ static NORETURN void task_bootstrap_user(void) {
   uint64_t user_rflags = 0x202;
   uint64_t user_rsp = t->user_stack_top;
   uint64_t user_rip = t->user_entry;
+  /* RDI/RSI for the very first user-mode instruction -- see struct
+   * task's own comment on user_arg0/user_arg1 (sched.h). Zero for a
+   * plain ELF spawn (main(void) ignores both); split()'s child reads
+   * them as its (arg, real-entry-function) pair -- see
+   * userland/crt0.S's _split_trampoline. */
+  uint64_t user_rdi = t->user_arg0;
+  uint64_t user_rsi = t->user_arg1;
 
   asm volatile("push %0\n\t"
                "push %1\n\t"
@@ -148,7 +200,7 @@ static NORETURN void task_bootstrap_user(void) {
                "iretq\n\t"
                :
                : "r"(user_ss), "r"(user_rsp), "r"(user_rflags), "r"(user_cs),
-                 "r"(user_rip)
+                 "r"(user_rip), "D"(user_rdi), "S"(user_rsi)
                : "memory");
 
   __builtin_unreachable();
@@ -198,7 +250,8 @@ struct task *task_create(const char *name, task_entry_t entry, void *arg) {
 }
 
 struct task *task_create_user(const char *name, uint64_t cr3_phys,
-                              uint64_t entry, uint64_t user_stack_top) {
+                              uint64_t entry, uint64_t user_stack_top,
+                              uint64_t arg0, uint64_t arg1) {
   struct task *t = kzalloc(sizeof(struct task));
   if (t == NULL) {
     kprintf("sched: out of memory creating task '%s'\n", name);
@@ -222,6 +275,8 @@ struct task *task_create_user(const char *name, uint64_t cr3_phys,
   t->cr3_phys = cr3_phys;
   t->user_entry = entry;
   t->user_stack_top = user_stack_top;
+  t->user_arg0 = arg0;
+  t->user_arg1 = arg1;
 
   uint64_t stack_top =
       (uint64_t)phys_to_virt(stack_phys) + KERNEL_STACK_PAGES * PAGE_SIZE;
@@ -237,23 +292,42 @@ struct task *task_create_user(const char *name, uint64_t cr3_phys,
 
   __atomic_fetch_add(&live_task_count, 1, __ATOMIC_RELAXED);
   register_task(t);
-  enqueue_ready(t);
+  /* Deliberately NOT enqueue_ready() here -- see task_publish()'s own
+   * comment (sched.h) for why. */
   return t;
 }
+
+void task_publish(struct task *t) { enqueue_ready(t); }
 
 static void finish_task_exit(struct task *t) {
   uint64_t wf = spinlock_acquire_irqsave(&wait_lock);
   t->state = TASK_DEAD;
   struct task *waiter = t->waiting_parent;
   t->waiting_parent = NULL;
+
+  /* Same critical section, same lock, as the waiting_parent check
+   * just above -- see struct task::parent's comment on why this has
+   * to be wait_lock-protected, and orphan_children()'s comment on why
+   * that guarantees `parent` (if non-NULL here) is still safely
+   * dereferenceable. */
+  struct task *any_parent = t->parent;
+  bool wake_any = (any_parent != NULL && any_parent->waiting_for_any_child);
   spinlock_release_irqrestore(&wait_lock, wf);
 
   if (waiter != NULL) {
     wake_blocked_task(waiter);
   }
+  if (wake_any) {
+    wake_blocked_task(any_parent);
+  }
 
   if (!t->waitable) {
     unregister_task(t);
+    orphan_children(t); /* see that function's comment -- a kernel
+                            task can be a parent too (process_spawn()
+                            doesn't care who calls it), and this one's
+                            struct is about to be freed for real, right
+                            now, not deferred to a later reap call. */
     pmm_free_pages(t->kernel_stack_phys, t->kernel_stack_pages);
     kfree(t);
     __atomic_fetch_sub(&live_task_count, 1, __ATOMIC_RELAXED);
@@ -434,12 +508,6 @@ void sched_tick(void) {
   struct cpu_local *cpu = this_cpu();
   uint64_t now = timer_uptime_ms();
 
-  /* Wake any sleepers whose time has come. Safe to enqueue_ready()
-   * directly here, on whichever cpu's timer happens to notice --
-   * unlike the OLD sched_sleep_ms(), a task only ever appears in
-   * this list via schedule()'s drain loop, which only publishes it
-   * once its owning cpu's context_switch() away has already
-   * completed. See schedule()'s comment. */
   struct task *woken = NULL;
   uint64_t f = spinlock_acquire_irqsave(&sleep_lock);
   struct task **pp = &sleep_head;
@@ -574,12 +642,83 @@ int sched_wait_task(struct task *child) {
   if (child->cr3_phys != 0) {
     vmm_free_user_space(child->cr3_phys);
   }
+  orphan_children(child);
 
   pmm_free_pages(child->kernel_stack_phys, child->kernel_stack_pages);
   kfree(child);
   __atomic_fetch_sub(&live_task_count, 1, __ATOMIC_RELAXED);
   return code;
 }
+
+int64_t sched_wait_any(int *code_out) {
+  struct task *me = this_cpu()->current_task;
+
+  for (;;) {
+    uint64_t wf = spinlock_acquire_irqsave(&wait_lock);
+
+    struct task *dead = NULL;
+    bool any_child = false;
+
+    uint64_t rf = spinlock_acquire_irqsave(&registry_lock);
+    for (struct task *t = registry_head; t != NULL; t = t->reg_next) {
+      if (t->parent != me || t->reaped) {
+        continue;
+      }
+      any_child = true;
+      if (t->state == TASK_DEAD) {
+        dead = t;
+        break;
+      }
+    }
+    spinlock_release_irqrestore(&registry_lock, rf);
+
+    if (dead != NULL) {
+      dead->reaped = true; /* claimed, atomically with the scan above */
+      spinlock_release_irqrestore(&wait_lock, wf);
+
+      int code = dead->exit_code;
+      uint64_t pid = dead->id;
+
+      unregister_task(dead);
+      for (int i = 0; i < PROC_MAX_FDS; i++) {
+        if (dead->fds[i] != NULL) {
+          vfs_close(dead->fds[i]);
+          dead->fds[i] = NULL;
+        }
+      }
+      if (dead->cr3_phys != 0) {
+        vmm_free_user_space(dead->cr3_phys);
+      }
+      orphan_children(dead);
+      pmm_free_pages(dead->kernel_stack_phys, dead->kernel_stack_pages);
+      kfree(dead);
+      __atomic_fetch_sub(&live_task_count, 1, __ATOMIC_RELAXED);
+
+      if (code_out != NULL) {
+        *code_out = code;
+      }
+      return (int64_t)pid;
+    }
+
+    if (!any_child) {
+      spinlock_release_irqrestore(&wait_lock, wf);
+      return -1; /* nothing of ours left, dead or alive -- nothing to
+                    ever wait for */
+    }
+
+    me->switched_away = false;
+    me->waiting_for_any_child = true;
+    me->state = TASK_BLOCKED;
+    spinlock_release_irqrestore(&wait_lock, wf);
+
+    schedule();
+
+    uint64_t wf2 = spinlock_acquire_irqsave(&wait_lock);
+    me->waiting_for_any_child = false;
+    spinlock_release_irqrestore(&wait_lock, wf2);
+  }
+}
+
 uint32_t sched_task_count(void) {
   return __atomic_load_n(&live_task_count, __ATOMIC_RELAXED);
 }

@@ -37,6 +37,7 @@ char *u_strncpy(char *dst, const char *src, size_t n);
 int u_spawn(const char *path); /* -> pid, or -1 */
 int u_wait(int pid);           /* -> exit code, or -1 */
 
+int u_wait_any(int *code_out);
 /* Replaces the calling process's own image with the ELF at `path`, in
  * place: same pid, same open fds, fresh address space and entry
  * point (see abi/syscall_nr.h's SYS_exec). Never returns on success --
@@ -44,6 +45,30 @@ int u_wait(int pid);           /* -> exit code, or -1 */
  * exec(). Returns -1 on failure, in which case the caller's current
  * image is left completely untouched. */
 int u_exec(const char *path);
+
+/* Entry-point signature for u_split()'s child -- deliberately shaped
+ * like the KERNEL's own task_entry_t (sched/sched.h), not like
+ * main()'s int-returning, no-args C convention: split() is Nexus's
+ * take on "give me a second running copy of my current process," and
+ * its child starts at an explicit function + argument rather than
+ * resuming wherever the caller was (see u_split()'s own comment for
+ * why that's the whole point). */
+typedef void (*u_task_entry_t)(void *arg);
+
+/* Duplicates the calling process's ENTIRE current memory image (heap,
+ * globals, stack contents, everything -- a real copy, not
+ * copy-on-write) into a brand new, independently scheduled task, and
+ * returns its pid to the ORIGINAL caller, which keeps running
+ * completely unaffected -- there's no POSIX-style double return here.
+ * The new task does NOT resume wherever u_split() was called from; it
+ * starts fresh at `entry(arg)`, on its own stack, and exits
+ * automatically (code 0) if `entry` ever returns. Every fd the caller
+ * had open is independently duplicated into the child (its own
+ * offset, not shared with the parent's -- see fs/vfs.c's vfs_dup() on
+ * the kernel side). Returns the child's pid, or -1 on failure (in
+ * which case nothing happens: no child, caller's own state
+ * untouched). */
+int u_split(u_task_entry_t entry, void *arg);
 
 /* Filesystem -- thin wrappers over SYS_open/SYS_read/SYS_close/
  * SYS_readdir. `flags` for u_open() matches abi/syscall_nr.h's

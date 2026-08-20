@@ -35,6 +35,8 @@ struct task {
   uint64_t cr3_phys;
   uint64_t user_entry;
   uint64_t user_stack_top;
+  uint64_t user_arg0;
+  uint64_t user_arg1;
   uint64_t brk_start; /* just past the highest loaded ELF segment */
   uint64_t brk;       /* current program break, grown by sys_brk */
   struct vfs_file *fds[PROC_MAX_FDS];
@@ -44,6 +46,9 @@ struct task {
   bool reaped;
   volatile bool switched_away;
   volatile bool kill_requested;
+
+  struct task *parent;
+  bool waiting_for_any_child;
   struct task *next;
   struct task *wq_next;
   struct task *reg_next;
@@ -60,9 +65,14 @@ void sched_init(void);
 struct task *task_create(const char *name, task_entry_t entry, void *arg);
 
 struct task *task_create_user(const char *name, uint64_t cr3_phys,
-                              uint64_t entry, uint64_t user_stack_top);
+                              uint64_t entry, uint64_t user_stack_top,
+                              uint64_t arg0, uint64_t arg1);
+
+void task_publish(struct task *t);
 
 int sched_wait_task(struct task *child);
+
+int64_t sched_wait_any(int *code_out);
 
 struct task *sched_find_waitable_task(uint64_t id);
 bool sched_task_is_dead(struct task *t);
