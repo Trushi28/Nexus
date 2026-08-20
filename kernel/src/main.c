@@ -12,6 +12,7 @@
 #include "debug/serial.h"
 #include "drivers/keyboard.h"
 #include "drivers/nvme.h"
+#include "drivers/virtio_blk.h"
 #include "fs/graph.h"
 #include "fs/graphfs_vfs.h"
 #include "fs/initrd.h"
@@ -50,9 +51,17 @@ static void graph_autosave_task(void *arg) {
     }
   }
 }
-static void nvme_init_task(void *arg) {
+static void blockdev_init_task(void *arg) {
   (void)arg;
-  if (nvme_init()) {
+  /* Try each supported block device driver in turn -- the first
+   * whose *_init() succeeds claims the single blockdev_register()
+   * slot (see drivers/blockdev.h); fs/graph.c's persistence layer
+   * doesn't know or care which one it ended up being. */
+  bool have_disk = nvme_init();
+  if (!have_disk) {
+    have_disk = virtio_blk_init();
+  }
+  if (have_disk) {
     graph_load_from_disk(); /* best-effort -- logs its own outcome,
                                 including the ordinary "nothing saved
                                 yet" case on a fresh disk */
@@ -173,7 +182,7 @@ NORETURN void kmain(void) {
   kprintf("[boot] core init complete, starting the scheduler\n\n");
 
   task_create("shell", shell_task, NULL);
-  task_create("nvme", nvme_init_task, NULL);
+  task_create("blockdev", blockdev_init_task, NULL);
   task_create("gautosave", graph_autosave_task, NULL);
   if (strstr(g_boot.cmdline, "selftest") != NULL) {
     task_create("selftest", selftest_task, NULL);

@@ -71,30 +71,54 @@ run-hdd-uefi: edk2-ovmf-bins $(IMAGE_NAME).hdd
 		-hda $(IMAGE_NAME).hdd \
 		$(QEMUFLAGS)
 
-NVME_IMG := nvme_test.img
+TEST_DISK_IMG := test_disk.img
 
-$(NVME_IMG):
-	qemu-img create -f raw $(NVME_IMG) 64M
+$(TEST_DISK_IMG):
+	qemu-img create -f raw $(TEST_DISK_IMG) 64M
 
 .PHONY: run-nvme
-run-nvme: $(IMAGE_NAME).iso $(NVME_IMG)
+run-nvme: $(IMAGE_NAME).iso $(TEST_DISK_IMG)
 	qemu-system-x86_64 \
 		-M q35 \
 		-cdrom $(IMAGE_NAME).iso \
 		-boot d \
-		-drive file=$(NVME_IMG),if=none,id=nvmedrive,format=raw \
+		-drive file=$(TEST_DISK_IMG),if=none,id=nvmedrive,format=raw \
 		-device nvme,drive=nvmedrive,serial=deadbeef \
 		$(QEMUFLAGS)
 
 .PHONY: run-nvme-uefi
-run-nvme-uefi: edk2-ovmf-bins $(IMAGE_NAME).iso $(NVME_IMG)
+run-nvme-uefi: edk2-ovmf-bins $(IMAGE_NAME).iso $(TEST_DISK_IMG)
 	qemu-system-x86_64 \
 		-M q35 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf-bins/ovmf-code-x86_64.fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-boot d \
-		-drive file=$(NVME_IMG),if=none,id=nvmedrive,format=raw \
+		-drive file=$(TEST_DISK_IMG),if=none,id=nvmedrive,format=raw \
 		-device nvme,drive=nvmedrive,serial=deadbeef \
+		$(QEMUFLAGS)
+
+# virtio-blk targets deliberately don't also attach an nvme device: the
+# boot sequence (main.c's blockdev_init_task) tries nvme_init() first,
+# so a machine with both would always end up testing NVMe, not this.
+.PHONY: run-virtio-blk
+run-virtio-blk: $(IMAGE_NAME).iso $(TEST_DISK_IMG)
+	qemu-system-x86_64 \
+		-M q35 \
+		-cdrom $(IMAGE_NAME).iso \
+		-boot d \
+		-drive file=$(TEST_DISK_IMG),if=none,id=vblkdrive,format=raw \
+		-device virtio-blk-pci,drive=vblkdrive \
+		$(QEMUFLAGS)
+
+.PHONY: run-virtio-blk-uefi
+run-virtio-blk-uefi: edk2-ovmf-bins $(IMAGE_NAME).iso $(TEST_DISK_IMG)
+	qemu-system-x86_64 \
+		-M q35 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf-bins/ovmf-code-x86_64.fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-boot d \
+		-drive file=$(TEST_DISK_IMG),if=none,id=vblkdrive,format=raw \
+		-device virtio-blk-pci,drive=vblkdrive \
 		$(QEMUFLAGS)
 
 edk2-ovmf-bins:
