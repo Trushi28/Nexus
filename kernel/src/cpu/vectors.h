@@ -27,7 +27,6 @@
 #define VEC_PANIC_HALT_IPI 0xFD
 #define VEC_LAPIC_ERROR 0xFE
 #define VEC_SPURIOUS 0xFF
-#define VEC_TIMER 0x40
 #define VEC_NVME_ADMIN 0x41
 #define VEC_NVME_IO 0x42
 

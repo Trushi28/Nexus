@@ -1,5 +1,6 @@
 #include "drivers/blockdev.h"
 #include "debug/log.h"
+#include "sched/sched.h"
 
 static const struct blockdev_ops *active_ops;
 static const char *active_name;
@@ -27,10 +28,45 @@ uint32_t blockdev_sector_size(void) {
   return (active_ops != NULL) ? active_ops->sector_size() : 0;
 }
 
+/* Guards every blockdev_read()/blockdev_write() call against any
+ * other concurrent one -- see blockdev.h's comment on those two for
+ * the full reasoning. Exactly the same CAS-spin-and-yield shape
+ * fs/graph.c used to hand-roll for its own two callers specifically
+ * (as `disk_op_lock`); living here instead means every caller gets
+ * it, not just those two. */
+static volatile bool io_busy = false;
+
+static void io_lock(void) {
+  for (;;) {
+    bool expected = false;
+    if (__atomic_compare_exchange_n(&io_busy, &expected, true, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      return;
+    }
+    sched_sleep_ms(5);
+  }
+}
+
+static void io_unlock(void) {
+  __atomic_store_n(&io_busy, false, __ATOMIC_RELEASE);
+}
+
 bool blockdev_read(uint64_t lba, uint32_t count, void *buf) {
-  return active_ops != NULL && active_ops->read(lba, count, buf);
+  if (active_ops == NULL) {
+    return false;
+  }
+  io_lock();
+  bool ok = active_ops->read(lba, count, buf);
+  io_unlock();
+  return ok;
 }
 
 bool blockdev_write(uint64_t lba, uint32_t count, const void *buf) {
-  return active_ops != NULL && active_ops->write(lba, count, buf);
+  if (active_ops == NULL) {
+    return false;
+  }
+  io_lock();
+  bool ok = active_ops->write(lba, count, buf);
+  io_unlock();
+  return ok;
 }

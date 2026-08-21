@@ -4,7 +4,6 @@
 #include "drivers/blockdev.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
-#include "sched/sched.h"
 #include "sync/spinlock.h"
 
 static spinlock_t graph_lock = SPINLOCK_INIT;
@@ -1015,54 +1014,42 @@ static bool deserialize_graph(const uint8_t *buf, size_t len) {
 }
 
 /* ------------------------------ disk gate -------------------------------
- * Serializes graph_save_to_disk()/graph_load_from_disk() against each
- * other. graph_lock isn't enough here -- that only covers the brief
- * in-memory critical section; this has to span an actual block-device
- * round-trip (blockdev_read()/blockdev_write() -> whatever the active
- * driver's own submit-and-wait looks like, e.g. drivers/nvme.c's
- * submit_and_wait() -> task_block()), which SLEEPS. Can't be a
- * spinlock: holding one across a blocking call leaves interrupts off
- * on this cpu for as long as the disk takes to answer.
+ * fs/graph.c used to hand-roll its own CAS-spin-and-yield lock here,
+ * serializing graph_save_to_disk()/graph_load_from_disk() against
+ * each other and against the autosave task (main.c's
+ * graph_autosave_task()) across each function's ENTIRE multi-step
+ * body. That's gone now: drivers/blockdev.c's blockdev_read()/
+ * blockdev_write() serialize themselves against any concurrent
+ * caller, kernel-wide, at the level of a single call -- see that
+ * file's own comment for why the guarantee has to live there instead
+ * of here (every future caller of the HAL needs it, not just this
+ * file's two functions).
  *
- * Before the autosave task existed, every caller here was serialized
- * by pure circumstance -- gsync/gload/reboot-save are all shell
- * commands, and there's only ever one shell task. Today's only
- * registered driver, drivers/nvme.c, has NO locking of its own: struct
- * nvme_queue::irq_wq is a single-slot wait_queue, so two overlapping
- * callers means the second's wait_queue_register() silently
- * overwrites the first's, and the first never gets woken -- a
- * permanent task hang, not a graceful failure. The autosave task is
- * the first thing able to race a shell-driven save/load, so this is
- * load-bearing now, not defensive.
- *
- * A CAS-spin-and-yield rather than a real sleeping mutex: exactly two
- * possible contenders (the shell task, the autosave task), and this
- * kernel doesn't have a blocking mutex primitive yet -- not worth
- * building one for a race this narrow. */
-static volatile bool disk_op_busy = false;
-
-static void disk_op_lock(void) {
-  for (;;) {
-    bool expected = false;
-    if (__atomic_compare_exchange_n(&disk_op_busy, &expected, true, false,
-                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-      return;
-    }
-    sched_sleep_ms(5);
-  }
-}
-
-static void disk_op_unlock(void) {
-  __atomic_store_n(&disk_op_busy, false, __ATOMIC_RELEASE);
-}
+ * That changes the GRANULARITY of what's atomic below (each
+ * blockdev_write()/blockdev_read() call is now its own critical
+ * section, not the whole superblock-then-payload sequence as one
+ * unit) but not the SAFETY of what ends up on disk. What actually
+ * protects a concurrent gload() from a save landing in the middle of
+ * it was always the checksum in struct graph_disk_superblock, not a
+ * lock spanning both functions: if a save's writes and a load's reads
+ * interleave, the load either sees the fully-old pairing (both stale,
+ * self-consistent, checksum matches) or the fully-new one (both
+ * fresh, checksum matches) -- or, in the narrow window where it reads
+ * a superblock from one moment and payload bytes from another, the
+ * checksum simply won't match, and graph_load_from_disk() already
+ * does exactly the right thing there: refuses to load rather than
+ * reconstructing a torn mix. See that function's checksum check
+ * below. The realistic exposure to that window is small besides:
+ * gload() already refuses to run against a non-empty in-memory graph,
+ * so it's a rare, deliberate, single-shot shell action -- not
+ * something racing autosave on every cycle the way two overlapping
+ * saves could. */
 
 bool graph_save_to_disk(void) {
   if (!blockdev_available()) {
     kprintf("[graph] no block device available -- can't save\n");
     return false;
   }
-
-  disk_op_lock();
 
   /* Clear dirty BEFORE the snapshot, not after writing it to disk. A
    * mutation landing after this point just re-sets the flag (every
@@ -1078,7 +1065,6 @@ bool graph_save_to_disk(void) {
     kprintf("[graph] out of memory allocating a %lu-page snapshot buffer\n",
             buf_pages);
     graph_mark_dirty();
-    disk_op_unlock();
     return false;
   }
   uint8_t *payload_buf = (uint8_t *)phys_to_virt(payload_phys);
@@ -1097,7 +1083,6 @@ bool graph_save_to_disk(void) {
         (uint64_t)sink.written, (unsigned)GRAPH_SNAPSHOT_MAX_BYTES);
     pmm_free_pages(payload_phys, buf_pages);
     graph_mark_dirty();
-    disk_op_unlock();
     return false;
   }
 
@@ -1110,7 +1095,6 @@ bool graph_save_to_disk(void) {
     kprintf("[graph] out of memory allocating the superblock buffer\n");
     pmm_free_pages(payload_phys, buf_pages);
     graph_mark_dirty();
-    disk_op_unlock();
     return false;
   }
   struct graph_disk_superblock *sb =
@@ -1122,12 +1106,12 @@ bool graph_save_to_disk(void) {
   sb->payload_bytes = payload_bytes;
   sb->next_node_id = saved_next_id;
 
-  bool ok = blockdev_write(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf) &&
-            blockdev_write(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb);
+  bool ok =
+      blockdev_write(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf) &&
+      blockdev_write(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb);
 
   pmm_free_pages(payload_phys, buf_pages);
   pmm_free_page(sb_phys);
-  disk_op_unlock();
 
   if (!ok) {
     kprintf("[graph] NVMe write failed while saving\n");
@@ -1151,12 +1135,9 @@ bool graph_load_from_disk(void) {
     return false;
   }
 
-  disk_op_lock();
-
   uint64_t sb_phys = pmm_alloc_page();
   if (sb_phys == 0) {
     kprintf("[graph] out of memory allocating the superblock buffer\n");
-    disk_op_unlock();
     return false;
   }
   struct graph_disk_superblock *sb =
@@ -1165,14 +1146,12 @@ bool graph_load_from_disk(void) {
   if (!blockdev_read(GRAPH_DISK_LBA_SUPERBLOCK, 1, sb)) {
     kprintf("[graph] failed reading the superblock\n");
     pmm_free_page(sb_phys);
-    disk_op_unlock();
     return false;
   }
 
   if (memcmp(sb->magic, "NEXUSGFS", 8) != 0) {
     kprintf("[graph] no saved graph found -- starting empty\n");
     pmm_free_page(sb_phys);
-    disk_op_unlock();
     return false;
   }
   if (sb->version != GRAPH_DISK_VERSION) {
@@ -1180,7 +1159,6 @@ bool graph_load_from_disk(void) {
             "%u -- skipping\n",
             sb->version, (unsigned)GRAPH_DISK_VERSION);
     pmm_free_page(sb_phys);
-    disk_op_unlock();
     return false;
   }
   if (sb->payload_bytes > GRAPH_SNAPSHOT_MAX_BYTES) {
@@ -1188,7 +1166,6 @@ bool graph_load_from_disk(void) {
             "kernel's %u-byte cap -- refusing\n",
             sb->payload_bytes, (unsigned)GRAPH_SNAPSHOT_MAX_BYTES);
     pmm_free_page(sb_phys);
-    disk_op_unlock();
     return false;
   }
 
@@ -1206,7 +1183,6 @@ bool graph_load_from_disk(void) {
   if (payload_phys == 0) {
     kprintf("[graph] out of memory allocating a %lu-page load buffer\n",
             buf_pages);
-    disk_op_unlock();
     return false;
   }
   uint8_t *payload_buf = (uint8_t *)phys_to_virt(payload_phys);
@@ -1214,7 +1190,6 @@ bool graph_load_from_disk(void) {
   if (!blockdev_read(GRAPH_DISK_LBA_PAYLOAD, payload_sectors, payload_buf)) {
     kprintf("[graph] failed reading the saved graph payload\n");
     pmm_free_pages(payload_phys, buf_pages);
-    disk_op_unlock();
     return false;
   }
 
@@ -1222,14 +1197,11 @@ bool graph_load_from_disk(void) {
     kprintf("[graph] saved graph failed its checksum (corrupt or "
             "partially written) -- refusing to load it\n");
     pmm_free_pages(payload_phys, buf_pages);
-    disk_op_unlock();
     return false;
   }
 
   bool ok = deserialize_graph(payload_buf, (size_t)payload_bytes);
   pmm_free_pages(payload_phys, buf_pages);
-  disk_op_unlock(); /* deserialize_graph() is over; nothing past this
-                        point touches the disk */
 
   if (!ok) {
     kprintf("[graph] load failed partway through -- graph may be "
