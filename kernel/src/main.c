@@ -171,11 +171,11 @@ NORETURN void kmain(void) {
 
   timer_calibrate();
 
+  sched_init();
+
   smp_init(); /* releases APs; fire-and-forget, see smp.c */
 
   timer_start_periodic_for_this_cpu(); /* the BSP's own tick */
-
-  sched_init();
 
   keyboard_init(bsp->lapic_id);
 
