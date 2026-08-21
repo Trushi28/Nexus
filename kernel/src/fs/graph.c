@@ -4,7 +4,11 @@
 #include "drivers/blockdev.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "mm/slab.h"
 #include "sync/spinlock.h"
+
+static struct slab_cache gnode_cache;
+static struct slab_cache gedge_cache;
 
 static spinlock_t graph_lock = SPINLOCK_INIT;
 
@@ -42,13 +46,15 @@ bool graph_is_dirty(void) {
 }
 
 void graph_init(void) {
+  slab_cache_init(&gnode_cache, sizeof(struct gnode), "gnode");
+  slab_cache_init(&gedge_cache, sizeof(struct gedge), "gedge");
   for (uint32_t i = 0; i < SSTRING_MAX_ENTRIES; i++) {
     sstrings[i].used = false;
   }
 }
 
 struct gnode *graph_node_create(const char *label) {
-  struct gnode *n = kzalloc(sizeof(struct gnode));
+  struct gnode *n = slab_alloc(&gnode_cache);
   if (n == NULL) {
     return NULL;
   }
@@ -135,14 +141,14 @@ static uint32_t release_cascade_locked(struct gnode *start) {
         target->release_next = worklist;
         worklist = target;
       }
-      kfree(e);
+      slab_free(&gedge_cache, e);
       e = next_e;
     }
 
     if (n->data != NULL) {
       kfree(n->data);
     }
-    kfree(n);
+    slab_free(&gedge_cache, e);
     freed++;
   }
   return freed;
@@ -262,14 +268,14 @@ static uint32_t collect_cycles_locked(void) {
           freed += release_cascade_locked(target);
         }
       }
-      kfree(e);
+      slab_free(&gedge_cache, e);
       e = next_e;
     }
 
     if (n->data != NULL) {
       kfree(n->data);
     }
-    kfree(n);
+    slab_free(&gedge_cache, e);
     freed++;
 
     n = next_dead;
@@ -312,7 +318,7 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
   }
   spinlock_release_irqrestore(&graph_lock, f);
 
-  struct gedge *e = kzalloc(sizeof(struct gedge));
+  struct gedge *e = slab_alloc(&gedge_cache);
   if (e == NULL) {
     return;
   }
@@ -330,7 +336,7 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
       release_cascade_locked(old_target);
     }
     spinlock_release_irqrestore(&graph_lock, f);
-    kfree(e);
+    slab_free(&gedge_cache, e);
     graph_mark_dirty();
     return;
   }
@@ -360,7 +366,7 @@ void graph_unlink(struct gnode *from, const char *edge_name) {
   from->edge_count--;
 
   struct gnode *target = dead->target;
-  kfree(dead);
+  slab_free(&gedge_cache, dead);
 
   target->refcount--;
   uint32_t freed = 0;
@@ -923,7 +929,7 @@ static void gsrc_get_into_node(struct gsrc *s, struct gnode *n, uint64_t len) {
 }
 
 static struct gnode *graph_node_create_with_id(uint64_t id, const char *label) {
-  struct gnode *n = kzalloc(sizeof(struct gnode));
+  struct gnode *n = slab_alloc(&gnode_cache);
   if (n == NULL) {
     return NULL;
   }

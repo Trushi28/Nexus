@@ -139,7 +139,7 @@ NORETURN void kmain(void) {
   ioapic_init();
 
   heap_init();
-
+  vfs_init();
   /* Mount tmpfs at "/" and unpack the initrd module into it -- both
    * need the heap (kmalloc-backed vnodes/file buffers), nothing else.
    * A missing module just leaves "/" empty; not fatal, since a

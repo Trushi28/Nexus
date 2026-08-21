@@ -85,6 +85,7 @@ struct vfs_file {
                 sys_read_impl()/sys_write_impl() actually check today. */
 };
 
+void vfs_init(void);
 /* Installs `root` as the single mounted root ("/"). Call once at boot
  * before anything tries to open a path. */
 void vfs_set_root(struct vnode *root);

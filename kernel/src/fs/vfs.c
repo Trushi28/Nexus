@@ -1,6 +1,8 @@
 #include "fs/vfs.h"
 #include "abi/syscall_nr.h"
 #include "mm/heap.h"
+#include "mm/slab.h"
+static struct slab_cache vfs_file_cache;
 
 static struct vnode *root_node;
 
@@ -26,6 +28,10 @@ void vfs_set_root_fallback(struct vnode *fallback) { root_fallback = fallback; }
  * string-prefix edge cases (partial component matches, redundant
  * slashes, etc) to worry about.
  * -------------------------------------------------------------------- */
+
+void vfs_init(void) {
+  slab_cache_init(&vfs_file_cache, sizeof(struct vfs_file), "vfs_file");
+}
 
 struct vfs_mount_entry {
   bool used;
@@ -280,7 +286,7 @@ bool vfs_open(const char *path, int flags, struct vfs_file **out) {
   if (n->type != VNODE_FILE) {
     return false;
   }
-  struct vfs_file *f = kzalloc(sizeof(struct vfs_file));
+  struct vfs_file *f = slab_alloc(&vfs_file_cache);
   if (f == NULL) {
     return false;
   }
@@ -298,11 +304,11 @@ void vfs_close(struct vfs_file *f) {
   if (f->node->ops->close != NULL) {
     f->node->ops->close(f->node);
   }
-  kfree(f);
+  slab_free(&vfs_file_cache, f);
 }
 
 struct vfs_file *vfs_dup(struct vfs_file *f) {
-  struct vfs_file *nf = kzalloc(sizeof(struct vfs_file));
+  struct vfs_file *nf = slab_alloc(&vfs_file_cache);
   if (nf == NULL) {
     return NULL;
   }
