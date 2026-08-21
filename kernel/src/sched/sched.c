@@ -5,8 +5,8 @@
 #include "cpu/io.h"
 #include "debug/log.h"
 #include "fs/vfs.h"
-#include "mm/heap.h"
 #include "mm/pmm.h"
+#include "mm/slab.h"
 #include "mm/vmm.h"
 #include "panic.h"
 #include "sync/spinlock.h"
@@ -48,6 +48,13 @@ static spinlock_t registry_lock = SPINLOCK_INIT;
 
 static uint64_t next_task_id = 1;
 static uint32_t live_task_count = 0;
+
+/* Every struct task -- kernel or user, however short-lived -- is
+ * allocated and freed through this one cache instead of kmalloc()/
+ * kfree() directly: task creation/destruction happens on every
+ * run/split/exit, which is exactly the "small, fixed-size, frequent"
+ * pattern mm/slab.h exists for. See sched_init(). */
+static struct slab_cache task_cache;
 
 static void push_ready_locked(struct task *t) {
   t->next = NULL;
@@ -210,10 +217,11 @@ void sched_init(void) {
   ready_head = ready_tail = NULL;
   sleep_head = NULL;
   registry_head = NULL;
+  slab_cache_init(&task_cache, sizeof(struct task), "task");
 }
 
 struct task *task_create(const char *name, task_entry_t entry, void *arg) {
-  struct task *t = kzalloc(sizeof(struct task));
+  struct task *t = slab_alloc(&task_cache);
   if (t == NULL) {
     panic("sched: out of memory creating task '%s'", name);
   }
@@ -252,7 +260,7 @@ struct task *task_create(const char *name, task_entry_t entry, void *arg) {
 struct task *task_create_user(const char *name, uint64_t cr3_phys,
                               uint64_t entry, uint64_t user_stack_top,
                               uint64_t arg0, uint64_t arg1) {
-  struct task *t = kzalloc(sizeof(struct task));
+  struct task *t = slab_alloc(&task_cache);
   if (t == NULL) {
     kprintf("sched: out of memory creating task '%s'\n", name);
     return NULL;
@@ -261,7 +269,7 @@ struct task *task_create_user(const char *name, uint64_t cr3_phys,
   uint64_t stack_phys = pmm_alloc_pages(KERNEL_STACK_PAGES);
   if (stack_phys == 0) {
     kprintf("sched: out of memory allocating a kernel stack for '%s'\n", name);
-    kfree(t);
+    slab_free(&task_cache, t);
     return NULL;
   }
 
@@ -329,7 +337,7 @@ static void finish_task_exit(struct task *t) {
                             struct is about to be freed for real, right
                             now, not deferred to a later reap call. */
     pmm_free_pages(t->kernel_stack_phys, t->kernel_stack_pages);
-    kfree(t);
+    slab_free(&task_cache, t);
     __atomic_fetch_sub(&live_task_count, 1, __ATOMIC_RELAXED);
   }
 }
@@ -488,7 +496,7 @@ static void schedule(void) {
 NORETURN void sched_enter_idle(void) {
   struct cpu_local *cpu = this_cpu();
 
-  struct task *idle = kzalloc(sizeof(struct task));
+  struct task *idle = slab_alloc(&task_cache);
   strncpy(idle->name, cpu->is_bsp ? "idle/bsp" : "idle/ap",
           sizeof(idle->name) - 1);
   idle->id = 0;
@@ -645,7 +653,7 @@ int sched_wait_task(struct task *child) {
   orphan_children(child);
 
   pmm_free_pages(child->kernel_stack_phys, child->kernel_stack_pages);
-  kfree(child);
+  slab_free(&task_cache, child);
   __atomic_fetch_sub(&live_task_count, 1, __ATOMIC_RELAXED);
   return code;
 }
@@ -691,7 +699,7 @@ int64_t sched_wait_any(int *code_out) {
       }
       orphan_children(dead);
       pmm_free_pages(dead->kernel_stack_phys, dead->kernel_stack_pages);
-      kfree(dead);
+      slab_free(&task_cache, dead);
       __atomic_fetch_sub(&live_task_count, 1, __ATOMIC_RELAXED);
 
       if (code_out != NULL) {
@@ -721,4 +729,13 @@ int64_t sched_wait_any(int *code_out) {
 
 uint32_t sched_task_count(void) {
   return __atomic_load_n(&live_task_count, __ATOMIC_RELAXED);
+}
+
+void sched_task_cache_stats(uint64_t *allocated_out, uint64_t *pages_out) {
+  if (allocated_out != NULL) {
+    *allocated_out = task_cache.num_allocated;
+  }
+  if (pages_out != NULL) {
+    *pages_out = task_cache.num_pages;
+  }
 }

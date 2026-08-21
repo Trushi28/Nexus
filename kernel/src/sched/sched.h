@@ -101,4 +101,13 @@ NORETURN void task_exit(void);
 
 uint32_t sched_task_count(void);
 
+/* Diagnostic snapshot of the struct task slab cache -- see mm/slab.h.
+ * `allocated_out` is the number of live tasks currently checked out
+ * (should track sched_task_count() closely, modulo the tiny window
+ * between a slab_alloc() and this task becoming visible to sched);
+ * `pages_out` is how many PMM pages the cache has ever committed
+ * (never shrinks, see slab_free()'s own comment on why). Either
+ * pointer may be NULL if you only want the other. */
+void sched_task_cache_stats(uint64_t *allocated_out, uint64_t *pages_out);
+
 #endif /* NEXUS_SCHED_H */

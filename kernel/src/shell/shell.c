@@ -607,6 +607,11 @@ static void cmd_meminfo(const char *args) {
 
   kprintf("physical: %s total, %s used, %s free\n", total, used, free_);
   kprintf("heap:     %s used, %s reserved\n", hused, hcap);
+
+  uint64_t task_slab_allocated, task_slab_pages;
+  sched_task_cache_stats(&task_slab_allocated, &task_slab_pages);
+  kprintf("task slab: %lu live, %lu page(s) committed\n", task_slab_allocated,
+          task_slab_pages);
 }
 
 static void cmd_cpuinfo(const char *args) {

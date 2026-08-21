@@ -84,8 +84,6 @@ GNUmakefile    top-level build: fetches Limine, builds everything, packs the ima
 ## Roadmap
 
 - `fork` / `exec`
-- Slab allocator
-- Block device driver (virtio-blk)
 
 Already shipped, despite older notes to the contrary: real `copy_from_user`/
 `copy_to_user` with page-fault recovery (`cpu/usercopy.c`), background jobs
@@ -94,10 +92,16 @@ polled) NVMe driver, `O_RDONLY`/`O_WRONLY` enforcement on open file
 descriptors, a generic VFS mount table (`vfs_mount()`/`vfs_unmount()` --
 currently unused, since the graph filesystem uses the separate, simpler
 `vfs_set_root_fallback()` instead; ready for whenever a second real
-mountable filesystem shows up), and the graph filesystem grafted
+mountable filesystem shows up), the graph filesystem grafted
 transparently into the classic path namespace (`sstring photos <node>`
 makes `/photos` work like any other top-level path -- see
-`fs/graphfs_vfs.c`).
+`fs/graphfs_vfs.c`), and a `struct slab_cache` allocator (`mm/slab.c`)
+now backing `struct task` allocation instead of the general heap.
+A second block device driver, virtio-blk (`drivers/virtio_blk.c`),
+also exists behind the same `drivers/blockdev.h` HAL as NVMe -- but
+it's compile-tested only, **not yet verified against real hardware or
+QEMU** (see the header comment); treat it as unverified until someone
+actually boots `make run-virtio-blk`.
 
 For the design rationale behind specific choices and how this has been
 tested, see [docs/DESIGN.md](docs/DESIGN.md).
