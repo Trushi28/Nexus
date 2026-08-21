@@ -4,11 +4,22 @@
 # (see https://wiki.osdev.org/Limine_Bare_Bones and the official
 # limine-c-template-x86-64 repository), extended with the extra flags a
 # kernel that actually enables interrupts and runs on multiple cores needs
-# (-mno-red-zone in particular — see the comment below).
+# (-mno-red-zone in particular -- see the comment below).
+#
+# Everything this produces (object files, the linked kernel binary, and
+# the two headers get-deps fetches) lands under $(BUILD_DIR), never
+# inside this source tree -- see docs/BUILD_LAYOUT.md. Invoked from the
+# top-level Makefile with BUILD_DIR already set to .../build/kernel;
+# running `make` directly inside kernel/ still works standalone and
+# just defaults BUILD_DIR to kernel/build.
 
 .SUFFIXES:
 
-override KERNEL := bin/kernel
+override BUILD_DIR := $(abspath $(if $(BUILD_DIR),$(BUILD_DIR),build))
+
+override KERNEL := $(BUILD_DIR)/bin/kernel
+override OBJDIR := $(BUILD_DIR)/obj
+override DEPSDIR := $(BUILD_DIR)/include
 
 # Convenience macro to reliably declare user-overridable variables.
 define DEFAULT_VAR =
@@ -70,8 +81,11 @@ override CFLAGS += \
 # maddening stack corruption that only reproduces under load.
 
 # Internal C preprocessor flags that should not be changed by the user.
+# $(DEPSDIR) holds limine.h/font8x8_basic.h, fetched by get-deps into
+# the build directory -- see that script and $(BUILD_DIR)/.deps-obtained
+# below.
 override CPPFLAGS := \
-    -I include \
+    -I $(DEPSDIR) \
     -I src \
     $(CPPFLAGS)
 
@@ -90,34 +104,46 @@ override LDFLAGS += \
     -z max-page-size=0x1000 \
     -T linker.ld
 
-# Use "find" to glob all *.c and *.S files in the tree (src/ and, once
-# get-deps has run, no *.c files under include/ so this stays simple).
+# Use "find" to glob all *.c and *.S files in the tree (src/ only --
+# fetched deps now live under $(DEPSDIR), outside src/, so there's
+# nothing to accidentally sweep up there any more).
 override CFILES := $(shell find -L src -type f -name '*.c')
 override ASFILES := $(shell find -L src -type f -name '*.S')
-override OBJ := $(addprefix obj/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o))
-override HEADER_DEPS := $(addprefix obj/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
+override OBJ := $(addprefix $(OBJDIR)/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o))
+override HEADER_DEPS := $(addprefix $(OBJDIR)/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
 
 .PHONY: all
-all: $(KERNEL)
+all: sync-abi $(KERNEL)
 
-$(KERNEL): GNUmakefile linker.ld $(OBJ)
+# Regenerates kernel/src/abi/*.h from the canonical copy in ../abi/ --
+# see scripts/sync-abi.sh. Cheap (a handful of small file copies), run
+# unconditionally on every build rather than tracked as a file
+# dependency, so an edit to ../abi/*.h is never missed.
+.PHONY: sync-abi
+sync-abi:
+	@../scripts/sync-abi.sh
+
+$(BUILD_DIR)/.deps-obtained:
+	BUILD_DIR=$(BUILD_DIR) ./get-deps
+
+$(KERNEL): Makefile linker.ld $(BUILD_DIR)/.deps-obtained $(OBJ)
 	mkdir -p "$$(dirname $@)"
 	$(LD) $(OBJ) $(LDFLAGS) -o $@
 
 -include $(HEADER_DEPS)
 
-obj/%.c.o: %.c GNUmakefile
+$(OBJDIR)/%.c.o: %.c Makefile $(BUILD_DIR)/.deps-obtained
 	mkdir -p "$$(dirname $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-obj/%.S.o: %.S GNUmakefile
+$(OBJDIR)/%.S.o: %.S Makefile $(BUILD_DIR)/.deps-obtained
 	mkdir -p "$$(dirname $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 .PHONY: clean
 clean:
-	rm -rf bin obj
+	rm -rf $(BUILD_DIR)/bin $(BUILD_DIR)/obj
 
 .PHONY: distclean
-distclean: clean
-	rm -rf include .deps-obtained
+distclean:
+	rm -rf $(BUILD_DIR)

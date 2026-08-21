@@ -54,22 +54,21 @@ dkms.conf
 # debug information files
 *.dwo
 
-kernel/include/
-kernel/.deps-obtained
+# --- Nexus build output -----------------------------------------------
+# EVERYTHING the build produces funnels through one of these three --
+# see docs/BUILD_LAYOUT.md. `rm -rf build kernel/build userland/build`
+# (the last two only exist if you ran `make` standalone inside those
+# subdirs instead of from the top) always gets you back to a clean
+# checkout; nothing else in the tree is ever a build artifact.
+/build/
+/kernel/build/
+/userland/build/
 
-limine-binary/
-edk2-ovmf-bins/
-
-kernel/obj/
-kernel/bin/
-userland/obj/
-userland/bin/
-
-iso_root/
-initrd_root/
-initrd.tar
-*.iso
-*.hdd
+# Generated copies of the shared ABI headers (see abi/ -- the single
+# canonical source -- and scripts/sync-abi.sh, which regenerates these
+# on every build). Never hand-edit these two paths.
+/kernel/src/abi/*.h
+/userland/include/*.h
 
 .DS_Store
 *.swp

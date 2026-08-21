@@ -6,8 +6,12 @@
 #   include/limine.h          the Limine boot protocol header (BSD-2-Clause)
 #   include/font8x8_basic.h   an 8x8 bitmap font for the console (Public Domain)
 #
-# Re-run this (or just `rm kernel/.deps-obtained && make`) to refresh
-# limine.h against a newer protocol revision.
+# Lands under $BUILD_DIR/include (a build artifact, not repo content --
+# see docs/BUILD_LAYOUT.md) instead of kernel/include, so `rm -rf build`
+# is the one command that gets you back to a totally clean checkout.
+#
+# Re-run this (or just `rm -rf $BUILD_DIR/.deps-obtained && make`) to
+# refresh limine.h against a newer protocol revision.
 
 set -ex
 
@@ -15,14 +19,16 @@ set -ex
 # regardless of where `make` was invoked from.
 cd "$(dirname "$0")"
 
-mkdir -p include
+: "${BUILD_DIR:=../build/kernel}"
 
-curl -Lo include/limine.h \
+mkdir -p "$BUILD_DIR/include"
+
+curl -Lo "$BUILD_DIR/include/limine.h" \
     https://raw.githubusercontent.com/Limine-Bootloader/limine-protocol/trunk/include/limine.h
 
-curl -Lo include/font8x8_basic.h \
+curl -Lo "$BUILD_DIR/include/font8x8_basic.h" \
     https://raw.githubusercontent.com/dhepper/font8x8/master/font8x8_basic.h
 
-# Marker so the top-level GNUmakefile doesn't re-fetch on every build.
-# Delete this file (or just `make distclean`) to force a re-fetch.
-touch .deps-obtained
+# Marker so the Makefile doesn't re-fetch on every build. Deleting
+# $BUILD_DIR (or just `make distclean`) forces a re-fetch.
+touch "$BUILD_DIR/.deps-obtained"
