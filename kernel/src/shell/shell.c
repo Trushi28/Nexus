@@ -29,11 +29,91 @@
   3 /* beyond this edit distance, don't bother suggesting */
 #define COMPLETE_MAX_MATCHES 32 /* tab-completion candidate cap */
 
+/* ------------------------------ working directory -------------------------
+ * A real per-process cwd would live on struct task (sched/sched.h) and
+ * cross the syscall boundary with a SYS_chdir -- worth doing once
+ * something other than this one interactive shell task needs it, but
+ * that's a bigger change (new syscall, ABI bump via abi/syscall_nr.h,
+ * `make sync-abi`) than what "let me cd around" actually needs today.
+ * This is deliberately the smaller, shell-local version instead: a
+ * single static path this file's own command handlers consult, good
+ * enough for one interactive task, with the real process-level version
+ * left as later work if a second consumer ever shows up. */
+static char cwd[LINE_MAX] = "/";
+
+/* Joins `in` onto the shell's cwd (verbatim if `in` is already
+ * absolute) and normalizes the result -- collapsing "." and empty
+ * segments, and popping one component per ".." -- into `out`. Doesn't
+ * touch the VFS at all; whether the result actually exists is up to
+ * the caller to check (see cmd_cd()). Structurally the same split-
+ * and-walk shape as fs/vfs.c's own walk()/split_path(), kept as its
+ * own copy for the same reason vfs.c gives its two internal copies:
+ * this is shell-local, cwd-aware path math that has no business
+ * living in the VFS layer itself. */
+#define CWD_MAX_DEPTH 16
+
+static void resolve_path(const char *in, char *out, size_t out_max) {
+  char combined[LINE_MAX * 2];
+  if (in[0] == '/') {
+    strncpy(combined, in, sizeof(combined) - 1);
+    combined[sizeof(combined) - 1] = '\0';
+  } else {
+    ksnprintf(combined, sizeof(combined), "%s/%s", cwd, in);
+  }
+
+  char comps[CWD_MAX_DEPTH][64];
+  int depth = 0;
+
+  const char *p = combined;
+  while (*p == '/') {
+    p++;
+  }
+  while (*p != '\0' && depth < CWD_MAX_DEPTH) {
+    size_t n = 0;
+    while (*p != '\0' && *p != '/') {
+      if (n + 1 < sizeof(comps[0])) {
+        comps[depth][n++] = *p;
+      }
+      p++;
+    }
+    comps[depth][n] = '\0';
+
+    if (strcmp(comps[depth], "..") == 0) {
+      if (depth > 0) {
+        depth--;
+      }
+    } else if (comps[depth][0] != '\0' && strcmp(comps[depth], ".") != 0) {
+      depth++;
+    }
+    while (*p == '/') {
+      p++;
+    }
+  }
+
+  if (depth == 0) {
+    strncpy(out, "/", out_max - 1);
+    out[out_max - 1] = '\0';
+    return;
+  }
+
+  size_t off = 0;
+  out[0] = '\0';
+  for (int i = 0; i < depth; i++) {
+    int n = ksnprintf(out + off, out_max - off, "/%s", comps[i]);
+    if (n < 0 || (size_t)n >= out_max - off) {
+      break;
+    }
+    off += (size_t)n;
+  }
+}
+
 /* ------------------------------- line editing --------------------------- */
 
 static void print_prompt(void) {
   console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
   kprintf("nexus");
+  console_set_colors(NX_COLOR_DIM, NX_COLOR_BG);
+  kprintf(":%s", cwd);
   console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
   kprintf("> ");
 }
@@ -175,6 +255,7 @@ static void cmd_uname(const char *args);
 static void cmd_nvmeinfo(const char *args);
 static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
+static void cmd_cd(const char *args);
 static void cmd_run(const char *args);
 static void cmd_jobs(const char *args);
 static void cmd_kill(const char *args);
@@ -249,8 +330,12 @@ static struct shell_command commands[] = {
     {"uname", cmd_uname, "", "kernel/bootloader version info", NULL, 0},
     {"nvmeinfo", cmd_nvmeinfo, "",
      "NVMe namespace 1 info (if a controller was found)", NULL, 0},
-    {"ls", cmd_ls, "[path]", "list a directory (default: /)", NULL, 0},
+    {"ls", cmd_ls, "[path]", "list a directory (default: cwd)", NULL, 0},
     {"cat", cmd_cat, "<path>", "print a file's contents", NULL, 0},
+    {"cd", cmd_cd, "[path]",
+     "change the shell's working directory (default: /); supports .. and "
+     "relative paths",
+     NULL, 0},
     {"run", cmd_run, "<path> [&]",
      "load and run an ELF binary in ring 3 (append & to background it)", NULL,
      0},
@@ -421,8 +506,14 @@ static void try_complete(char *buf, uint32_t *len, uint32_t max) {
   memcpy(prefix, buf + word_start, prefix_len);
   prefix[prefix_len] = '\0';
 
-  const char *dir_path = "/";
+  /* Defaults to cwd, not "/" -- a bare (no-slash) argument completes
+   * against wherever the shell currently is, same as ls/cat/run's own
+   * relative-path handling (resolve_path()). A slash in the prefix
+   * still overrides this with its own (possibly relative, possibly
+   * absolute) directory fragment, resolved the same way. */
+  const char *dir_path = cwd;
   char dir_buf[LINE_MAX];
+  char resolved_dir[LINE_MAX];
   const char *seg_prefix = prefix;
 
   if (!is_first_word) {
@@ -441,7 +532,8 @@ static void try_complete(char *buf, uint32_t *len, uint32_t max) {
         memcpy(dir_buf, prefix, dlen);
         dir_buf[dlen] = '\0';
       }
-      dir_path = dir_buf;
+      resolve_path(dir_buf, resolved_dir, sizeof(resolved_dir));
+      dir_path = resolved_dir;
       seg_prefix = last_slash + 1;
     }
   }
@@ -884,11 +976,13 @@ static void cmd_nvmeinfo(const char *args) {
 }
 
 static void cmd_ls(const char *args) {
-  const char *path = (*args == '\0') ? "/" : args;
+  char resolved[LINE_MAX];
+  resolve_path(*args == '\0' ? "." : args, resolved, sizeof(resolved));
+
   char name[64];
   uint32_t i = 0;
   bool any = false;
-  while (vfs_readdir(path, i, name, sizeof(name))) {
+  while (vfs_readdir(resolved, i, name, sizeof(name))) {
     kprintf("  %s\n", name);
     i++;
     any = true;
@@ -903,9 +997,12 @@ static void cmd_cat(const char *args) {
     kprintf("usage: cat <path>\n");
     return;
   }
+  char resolved[LINE_MAX];
+  resolve_path(args, resolved, sizeof(resolved));
+
   struct vfs_file *f;
-  if (!vfs_open(args, O_RDONLY, &f)) {
-    print_error("cat: %s: no such file\n", args);
+  if (!vfs_open(resolved, O_RDONLY, &f)) {
+    print_error("cat: %s: no such file\n", resolved);
     return;
   }
   char buf[257];
@@ -916,6 +1013,26 @@ static void cmd_cat(const char *args) {
   }
   kprintf("\n");
   vfs_close(f);
+}
+
+/* Changes the shell's own cwd -- see resolve_path()'s comment for what
+ * "changes" means here (a shell-local static, not a real per-process
+ * field). Verifies the target actually resolves to a directory before
+ * committing it, so a typo leaves the old cwd in place with a clear
+ * error rather than silently pointing the prompt somewhere that will
+ * just fail every subsequent relative lookup. */
+static void cmd_cd(const char *args) {
+  char resolved[LINE_MAX];
+  resolve_path(*args == '\0' ? "/" : args, resolved, sizeof(resolved));
+
+  struct vnode *n = vfs_lookup_path(resolved);
+  if (n == NULL || n->type != VNODE_DIR) {
+    print_error("cd: %s: no such directory\n", resolved);
+    return;
+  }
+
+  strncpy(cwd, resolved, sizeof(cwd) - 1);
+  cwd[sizeof(cwd) - 1] = '\0';
 }
 
 static void cmd_run(const char *args) {
@@ -929,6 +1046,11 @@ static void cmd_run(const char *args) {
   pathbuf[sizeof(pathbuf) - 1] = '\0';
 
   bool background = strip_trailing_background(pathbuf);
+
+  char resolved[LINE_MAX];
+  resolve_path(pathbuf, resolved, sizeof(resolved));
+  strncpy(pathbuf, resolved, sizeof(pathbuf) - 1);
+  pathbuf[sizeof(pathbuf) - 1] = '\0';
 
   struct task *t = process_spawn(pathbuf, pathbuf);
   if (t == NULL) {
@@ -1352,12 +1474,67 @@ static void cmd_gload(const char *args) {
   graph_load_from_disk(); /* logs its own success/failure */
 }
 static void cmd_grm(const char *args) {
+  if (*args == '\0') {
+    kprintf("usage: grm <ref>\n");
+    return;
+  }
+
+  /* `args` names a live sstring anchor directly: an anchored node's
+   * refcount is never 0 while its anchor is up (the anchor itself is
+   * one of the references -- see docs/Design.md's note on graph FS
+   * deletion), so falling straight through to graph_node_delete()
+   * below would just refuse with a "still referenced" message a
+   * person then has to go work around by hand with a separate
+   * sstringrm call. Do that detach here instead, the same way
+   * gtouch() already does the equivalent create-side step (auto-
+   * creating every missing anchor/edge) rather than making the
+   * caller drive it themselves first. */
+  if (sstring_get(args) != NULL) {
+    sstring_unset(args); /* logs its own outcome */
+    return;
+  }
+
+  /* A deeper path (e.g. "photos/vacation"): the natural "remove
+   * this" is unlinking it from its parent, not requiring a separate
+   * gunlink call first -- same idea as the anchor case above, one
+   * level down the path. Only kicks in when `args` actually contains
+   * a '/'; a bare id or an unanchored label falls through to the
+   * direct-delete path unchanged. */
+  const char *last_slash = NULL;
+  for (const char *p = args; *p; p++) {
+    if (*p == '/') {
+      last_slash = p;
+    }
+  }
+  if (last_slash != NULL && last_slash != args) {
+    char parent_path[128];
+    size_t plen = (size_t)(last_slash - args);
+    if (plen >= sizeof(parent_path)) {
+      plen = sizeof(parent_path) - 1;
+    }
+    memcpy(parent_path, args, plen);
+    parent_path[plen] = '\0';
+
+    struct gnode *parent = graph_resolve(parent_path);
+    if (parent != NULL) {
+      graph_unlink(parent, last_slash + 1); /* logs its own outcome */
+      return;
+    }
+    /* Parent didn't resolve as a graph path -- fall through and let
+     * resolve_ref()/graph_node_delete() below give the ordinary
+     * "no such node" treatment. */
+  }
+
   struct gnode *n = resolve_ref(args);
   if (n == NULL) {
     kprintf("grm: no such node '%s'\n", args);
     return;
   }
-  graph_node_delete(n); /* logs its own outcome */
+  graph_node_delete(n); /* logs its own outcome -- a node still
+                            referenced from somewhere OTHER than the
+                            anchor/edge already handled above (e.g.
+                            multiple incoming edges) still correctly
+                            refuses here rather than force-deleting */
 }
 
 static void cmd_gunlink(const char *args) {
