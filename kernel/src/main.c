@@ -30,6 +30,7 @@
 #include "time/timer.h"
 #include "video/console.h"
 #include "video/fb.h"
+#include "video/splash.h"
 #define GRAPH_AUTOSAVE_INTERVAL_MS (30 * 1000)
 
 static void heartbeat_task(void *arg) {
@@ -53,21 +54,16 @@ static void graph_autosave_task(void *arg) {
 }
 static void blockdev_init_task(void *arg) {
   (void)arg;
-  /* Try each supported block device driver in turn -- the first
-   * whose *_init() succeeds claims the single blockdev_register()
-   * slot (see drivers/blockdev.h); fs/graph.c's persistence layer
-   * doesn't know or care which one it ended up being. */
   bool have_disk = nvme_init();
   if (!have_disk) {
     have_disk = virtio_blk_init();
   }
   if (have_disk) {
-    graph_load_from_disk(); /* best-effort -- logs its own outcome,
-                                including the ordinary "nothing saved
-                                yet" case on a fresh disk */
+    graph_load_from_disk();
   }
   task_exit();
 }
+
 static void selftest_task(void *arg) {
   (void)arg;
   kprintf("[selftest] spawning /bin/hello ...\n");
@@ -110,40 +106,43 @@ NORETURN void kmain(void) {
 
   fb_init();
   console_init();
+
+  /* splash_show() suspends the console (see console_set_suspended())
+   * and takes the framebuffer over directly -- everything below still
+   * logs to serial exactly as before, it just doesn't show up on
+   * screen until splash_finish() hands the framebuffer back. A no-op
+   * on a serial-only boot (no framebuffer), so print_banner()'s
+   * ordinary scrolling text is exactly what shows up in that case. */
+  splash_show();
   print_banner();
 
   pmm_init();
+  splash_progress(10, "physical memory");
 
-  /* vmm_init() registers the TLB-shootdown IPI handler as part of
-   * bringing up our own page tables -- isr_init() above must have run
-   * first, or this registration would be wiped out. */
   vmm_init();
+  splash_progress(20, "page tables");
 
   struct cpu_local *bsp = cpu_local_create(0, 0, 0, true);
   smp_register_bsp(bsp);
   cpu_setup_current(bsp); /* installs our GDT/TSS, sets GS_BASE */
 
-  /* idt_init() builds gates pointing at GDT_KERNEL_CODE (0x08), which
-   * is only meaningful once our own GDT (just installed above) is the
-   * one that's loaded. */
   idt_init();
   syscall_init();
   panic_init();
+  splash_progress(30, "cpu bring-up");
 
   acpi_init();
+  splash_progress(40, "ACPI");
 
   lapic_init();
   bsp->lapic_id = lapic_id();
   bsp->online = true;
 
   ioapic_init();
+  splash_progress(50, "interrupt controllers");
 
   heap_init();
   vfs_init();
-  /* Mount tmpfs at "/" and unpack the initrd module into it -- both
-   * need the heap (kmalloc-backed vnodes/file buffers), nothing else.
-   * A missing module just leaves "/" empty; not fatal, since a
-   * from-scratch OS is still perfectly usable without a filesystem. */
   vfs_set_root(tmpfs_create_root());
   graph_init();
   const struct limine_file *initrd = boot_find_module("initrd.tar");
@@ -153,31 +152,22 @@ NORETURN void kmain(void) {
     kprintf("[boot] no initrd module found -- '/' will be empty\n");
   }
 
-  /* From here on, any top-level name that isn't a real tmpfs entry
-   * falls through to the graph filesystem: `sstring photos <node>`
-   * makes "photos" work as an ordinary top-level path immediately
-   * (ls, cat, run, ring-3's open() with O_CREAT/O_TRUNC -- all of
-   * it), and a brand-new top-level name created through open(O_CREAT)
-   * becomes a new graph node auto-anchored under that same name -- no
-   * separate mount point, no /graph prefix. Deliberately registered
-   * only NOW, after the initrd is already unpacked: vfs_set_root_fallback()
-   * makes every *subsequent* top-level create prefer the graph over
-   * tmpfs (see fs/vfs.c's walk()), and initrd_unpack()'s own
-   * vfs_lookup_or_create() calls for "bin" etc. are top-level creates
-   * too -- registering the fallback any earlier would silently pull
-   * the whole initrd into the graph instead of tmpfs. See
-   * fs/graphfs_vfs.c for the adapter itself. */
   vfs_set_root_fallback(graphfs_vfs_root());
+  splash_progress(65, "filesystem");
 
   timer_calibrate();
 
   sched_init();
+  splash_progress(80, "scheduler");
 
   smp_init(); /* releases APs; fire-and-forget, see smp.c */
 
   timer_start_periodic_for_this_cpu(); /* the BSP's own tick */
+  splash_progress(90, "SMP");
 
   keyboard_init(bsp->lapic_id);
+  splash_progress(100, "ready");
+  splash_finish();
 
   kprintf("[boot] core init complete, starting the scheduler\n\n");
 

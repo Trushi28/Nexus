@@ -269,21 +269,23 @@ static void cmd_ps(const char *args) {
   static const char *state_names[] = {
       "ready", "running", "sleeping", "blocked", "exiting", "dead",
   };
-  u_print("  PID  NAME                  STATE     RING\n");
+  u_print("  ");
+  u_print_left("PID", 6);
+  u_print_left("NAME", 22);
+  u_print_left("STATE", 10);
+  u_print("RING\n");
+
   nx_task_info_t info;
   unsigned idx = 0;
   while (u_ps(idx, &info)) {
     char buf[16];
     u_itoa((int)info.pid, buf);
     u_print("  ");
-    u_print(buf);
-    u_print("  ");
-    u_print(info.name);
-    u_print("  ");
-    if (info.state < ARRAY_LEN(state_names)) {
-      u_print(state_names[info.state]);
-    }
-    u_print("  ");
+    u_print_left(buf, 6);
+    u_print_left(info.name, 22);
+    u_print_left(info.state < ARRAY_LEN(state_names) ? state_names[info.state]
+                                                     : "?",
+                 10);
     u_print(info.is_user ? "user" : "kernel");
     u_print("\n");
     idx++;

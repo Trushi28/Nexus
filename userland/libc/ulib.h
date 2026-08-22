@@ -32,6 +32,7 @@ unsigned u_uptime_ms(void);
  * callable from userland where klib.h doesn't exist). */
 int u_strcmp(const char *a, const char *b);
 char *u_strncpy(char *dst, const char *src, size_t n);
+void u_print_left(const char *s, int width);
 
 /* Process control -- see abi/syscall_nr.h's SYS_spawn/SYS_wait. */
 int u_spawn(const char *path); /* -> pid, or -1 */

@@ -56,11 +56,38 @@ static void ring_push(char c) {
   ring_head = next;
 }
 
+static bool extended_prefix = false;
+
 static void keyboard_isr(struct interrupt_frame *frame) {
   (void)frame;
   uint8_t sc = inb(KBD_DATA_PORT);
+
+  if (sc == 0xE0) {
+    /* Extended-scancode prefix (Scan Code Set 1) -- the real
+     * make/break code is the NEXT byte. Nothing to decode yet. */
+    extended_prefix = true;
+    return;
+  }
+
   bool release = (sc & 0x80) != 0;
   uint8_t code = sc & 0x7F;
+  bool was_extended = extended_prefix;
+  extended_prefix = false;
+
+  if (was_extended) {
+    // Only Up (0x48) / Down (0x50) are decoded
+    if (release) {
+      return;
+    }
+    if (code == 0x48) {
+      ring_push(KEY_UP);
+      wait_queue_wake(&kbd_wq);
+    } else if (code == 0x50) {
+      ring_push(KEY_DOWN);
+      wait_queue_wake(&kbd_wq);
+    }
+    return;
+  }
 
   if (code == 0x2A || code == 0x36) { /* left/right shift */
     shift_held = !release;

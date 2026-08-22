@@ -72,6 +72,7 @@ int u_getpid(void) { return (int)SC0(SYS_getpid); }
 void u_sleep_ms(unsigned ms) { SC1(SYS_sleep_ms, ms); }
 
 unsigned u_uptime_ms(void) { return (unsigned)SC0(SYS_uptime_ms); }
+
 int u_strcmp(const char *a, const char *b) {
   while (*a && (*a == *b)) {
     a++;
@@ -89,6 +90,14 @@ char *u_strncpy(char *dst, const char *src, size_t n) {
     dst[i] = '\0';
   }
   return dst;
+}
+
+void u_print_left(const char *s, int width) {
+  u_print(s);
+  int n = (int)u_strlen(s);
+  for (int i = n; i < width; i++) {
+    u_putc(' ');
+  }
 }
 
 int u_spawn(const char *path) { return (int)SC1(SYS_spawn, path); }

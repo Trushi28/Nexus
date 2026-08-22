@@ -58,11 +58,6 @@ static void sys_exit_impl(struct interrupt_frame *f) {
   task_exit(); /* never returns */
 }
 
-/* O_RDONLY/O_WRONLY/O_RDWR checks against how a given fd was actually
- * opened (struct vfs_file::flags, set by vfs_open()). STDIN/STDOUT/
- * STDERR never reach these -- sys_read_impl()/sys_write_impl() both
- * special-case those three before ever touching t->fds[], same as
- * before this existed. */
 static bool fd_readable(struct vfs_file *file) {
   int mode = file->flags & O_ACCMODE;
   return mode == O_RDONLY || mode == O_RDWR;
@@ -140,7 +135,9 @@ static void sys_read_impl(struct interrupt_frame *f) {
     uint64_t n = 0;
     while (n < len) {
       char c = keyboard_getc(); /* blocks -- fine, we're not holding anything */
-
+      if (c == KEY_UP || c == KEY_DOWN) {
+        continue;
+      }
       if (c == '\b') {
         if (n > 0) {
           n--;

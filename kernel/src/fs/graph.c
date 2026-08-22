@@ -148,7 +148,7 @@ static uint32_t release_cascade_locked(struct gnode *start) {
     if (n->data != NULL) {
       kfree(n->data);
     }
-    slab_free(&gedge_cache, e);
+    slab_free(&gnode_cache, e);
     freed++;
   }
   return freed;
@@ -275,7 +275,7 @@ static uint32_t collect_cycles_locked(void) {
     if (n->data != NULL) {
       kfree(n->data);
     }
-    slab_free(&gedge_cache, e);
+    slab_free(&gnode_cache, e);
     freed++;
 
     n = next_dead;

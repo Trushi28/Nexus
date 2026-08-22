@@ -14,12 +14,15 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ---
 
 This is the 0BSD license, used because it is what upstream Limine
-templates use. Third-party build-time dependencies fetched by
-kernel/get-deps keep their own licenses:
+templates use. One third-party build-time dependency, fetched by
+kernel/get-deps, keeps its own license:
 
-  - include/limine.h        -- BSD-2-Clause (Limine-Bootloader/limine-protocol)
-  - include/font8x8_basic.h -- Public Domain (dhepper/font8x8, derived from
-                                the classic IBM public-domain VGA font)
+  - include/limine.h -- BSD-2-Clause (Limine-Bootloader/limine-protocol)
 
-Neither file is vendored in this repository; get-deps downloads them
-fresh at build time (see kernel/get-deps).
+Not vendored in this repository; get-deps downloads it fresh at build
+time (see kernel/get-deps).
+
+The console/boot-splash font (kernel/src/video/nx_font8x8.h/.c) is
+this project's own -- hand-designed, not derived from any external
+font -- and is covered by this repository's own license like any
+other source file, not a third-party one.

@@ -31,7 +31,12 @@
 
 /* ------------------------------- line editing --------------------------- */
 
-static void print_prompt(void) { kprintf("nexus> "); }
+static void print_prompt(void) {
+  console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
+  kprintf("nexus");
+  console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
+  kprintf("> ");
+}
 
 static void echo_backspace(void) {
   serial_puts("\b \b");
@@ -64,6 +69,64 @@ static void print_left(const char *s, int width) {
   for (int i = n; i < width; i++) {
     kprintf(" ");
   }
+}
+
+/* A plain "---...---\n" rule of `width` dashes -- used under table
+ * headers (`ps`, `gnodes`) and section headers (`help`'s categories)
+ * so they read as a header, not just another row. */
+static void print_divider(uint32_t width) {
+  for (uint32_t i = 0; i < width; i++) {
+    kprintf("-");
+  }
+  kprintf("\n");
+}
+
+#define BOX_INNER_WIDTH 54
+
+/* One line of a simple ASCII box -- "| text...padding |" -- padded/
+ * truncated to exactly BOX_INNER_WIDTH columns so every border lines
+ * up regardless of what's inside. font8x8_basic has no real box-
+ * drawing glyphs, so plain -, |, + are the whole toolkit here. */
+static void print_box_line(const char *text) {
+  kprintf("| ");
+  uint32_t n = 0;
+  for (const char *p = text; *p != '\0' && n < BOX_INNER_WIDTH - 1; p++, n++) {
+    kprintf("%c", *p);
+  }
+  for (uint32_t i = n; i < BOX_INNER_WIDTH; i++) {
+    kprintf(" ");
+  }
+  kprintf("|\n");
+}
+
+static void print_box_border(void) {
+  kprintf("+");
+  for (uint32_t i = 0; i < BOX_INNER_WIDTH + 1; i++) {
+    kprintf("-");
+  }
+  kprintf("+\n");
+}
+
+/* Same idea as kprintf(), but in the shared "something's wrong" color
+ * -- reserved for the handful of error messages a person is most
+ * likely to hit while typing interactively (unknown command, bad
+ * pid, missing file, job table full). Most of this file's other
+ * error kprintf()s are deliberately left in the ordinary foreground
+ * color -- see docs/Design.md's note on shell chrome for where that
+ * line is drawn, rather than recoloring every kprintf() in the file
+ * on the theory that "error-ish" isn't the same judgment call twice
+ * in a row. */
+static __attribute__((format(printf, 1, 2))) void print_error(const char *fmt,
+                                                              ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  kvsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+
+  console_set_colors(NX_COLOR_ERROR, NX_COLOR_BG);
+  kprintf("%s", buf);
+  console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
 }
 
 static bool same_category(const char *a, const char *b) {
@@ -433,8 +496,68 @@ static void try_complete(char *buf, uint32_t *len, uint32_t max) {
   kprintf("%s", buf);
 }
 
+/* ------------------------------ history ----------------------------------*/
+#define HISTORY_MAX 16
+
+static char history[HISTORY_MAX][LINE_MAX];
+static uint32_t history_len =
+    0; /* entries currently stored, caps at HISTORY_MAX */
+static uint32_t history_next = 0; /* ring slot the next push lands in */
+
+static void history_push(const char *line) {
+  if (line[0] == '\0') {
+    return; /* don't clutter history with blank Enters */
+  }
+  if (history_len > 0) {
+    uint32_t last = (history_next + HISTORY_MAX - 1) % HISTORY_MAX;
+    if (strcmp(history[last], line) == 0) {
+      return; /* skip an exact repeat of the most recent entry */
+    }
+  }
+  strncpy(history[history_next], line, LINE_MAX - 1);
+  history[history_next][LINE_MAX - 1] = '\0';
+  history_next = (history_next + 1) % HISTORY_MAX;
+  if (history_len < HISTORY_MAX) {
+    history_len++;
+  }
+}
+
+/* age 0 = most recently entered command, age 1 = the one before that,
+ * and so on. NULL once `age` walks past however many entries exist. */
+static const char *history_get(uint32_t age) {
+  if (age >= history_len) {
+    return NULL;
+  }
+  uint32_t idx = (history_next + HISTORY_MAX - 1 - age) % HISTORY_MAX;
+  return history[idx];
+}
+
+/* Erases whatever's currently echoed (via `*len` backspaces) and
+ * echoes `new_content` in its place, updating `buf`/`*len` to match.
+ * This line editor has no cursor-movement support, so "replace the
+ * line" always means a full erase-and-retype against the console. */
+static void redraw_line(char *buf, uint32_t *len, uint32_t max,
+                        const char *new_content) {
+  while (*len > 0) {
+    (*len)--;
+    echo_backspace();
+  }
+  uint32_t n = 0;
+  while (new_content[n] != '\0' && n + 1 < max) {
+    buf[n] = new_content[n];
+    kprintf("%c", new_content[n]);
+    n++;
+  }
+  *len = n;
+}
+
 static uint32_t read_line(char *buf, uint32_t max) {
   uint32_t len = 0;
+  bool browsing = false;
+  uint32_t browse_age = 0;
+  char saved_line[LINE_MAX]; /* what the user had typed before pressing Up */
+  saved_line[0] = '\0';
+
   for (;;) {
     char c = keyboard_getc();
 
@@ -454,6 +577,38 @@ static uint32_t read_line(char *buf, uint32_t max) {
 
     if (c == '\t') {
       try_complete(buf, &len, max);
+      continue;
+    }
+
+    if (c == KEY_UP) {
+      if (!browsing) {
+        memcpy(saved_line, buf, len);
+        saved_line[len] = '\0';
+        if (history_get(0) == NULL) {
+          continue; /* nothing recorded yet */
+        }
+        browsing = true;
+        browse_age = 0;
+      } else if (history_get(browse_age + 1) != NULL) {
+        browse_age++;
+      } else {
+        continue; /* already at the oldest entry */
+      }
+      redraw_line(buf, &len, max, history_get(browse_age));
+      continue;
+    }
+
+    if (c == KEY_DOWN) {
+      if (!browsing) {
+        continue;
+      }
+      if (browse_age == 0) {
+        browsing = false;
+        redraw_line(buf, &len, max, saved_line);
+      } else {
+        browse_age--;
+        redraw_line(buf, &len, max, history_get(browse_age));
+      }
       continue;
     }
 
@@ -570,7 +725,12 @@ static void cmd_help(const char *args) {
   const char *last_category = NULL;
   for (size_t i = 0; i < ARRAY_LEN(commands); i++) {
     if (!same_category(commands[i].category, last_category)) {
-      kprintf("\n%s:\n", commands[i].category ? commands[i].category : "core");
+      const char *label = commands[i].category ? commands[i].category : "core";
+      kprintf("\n");
+      console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
+      kprintf("%s:\n", label);
+      console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
+      print_divider((uint32_t)strlen(label) + 1);
       last_category = commands[i].category;
     }
     char namebuf[32];
@@ -586,7 +746,8 @@ static void cmd_help(const char *args) {
   }
 
   kprintf("\n'aliases' lists shortcuts (list==ls, etc). Unknown commands\n"
-          "get a fuzzy 'did you mean'. Tab completes commands and paths.\n");
+          "get a fuzzy 'did you mean'. Tab completes commands and paths,\n"
+          "up/down arrows recall previous ones.\n");
 }
 
 static void cmd_clear(const char *args) {
@@ -595,6 +756,30 @@ static void cmd_clear(const char *args) {
 }
 
 static void cmd_echo(const char *args) { kprintf("%s\n", args); }
+
+/* A plain text usage bar -- "[####------]" -- filled proportionally
+ * to used/total, in the accent color, with the empty remainder dimmed.
+ * `width` is the number of '#'/'-' characters between the brackets. */
+static void print_usage_bar(uint64_t used, uint64_t total, uint32_t width) {
+  uint32_t filled = 0;
+  if (total > 0) {
+    filled = (uint32_t)((used * (uint64_t)width) / total);
+    if (filled > width) {
+      filled = width;
+    }
+  }
+  kprintf("[");
+  console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
+  for (uint32_t i = 0; i < filled; i++) {
+    kprintf("#");
+  }
+  console_set_colors(NX_COLOR_DIM, NX_COLOR_BG);
+  for (uint32_t i = filled; i < width; i++) {
+    kprintf("-");
+  }
+  console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
+  kprintf("]");
+}
 
 static void cmd_meminfo(const char *args) {
   (void)args;
@@ -605,8 +790,13 @@ static void cmd_meminfo(const char *args) {
   fmt_bytes(hused, sizeof(hused), heap_used_bytes());
   fmt_bytes(hcap, sizeof(hcap), heap_capacity_bytes());
 
-  kprintf("physical: %s total, %s used, %s free\n", total, used, free_);
-  kprintf("heap:     %s used, %s reserved\n", hused, hcap);
+  kprintf("physical: ");
+  print_usage_bar(pmm_used_bytes(), pmm_total_bytes(), 30);
+  kprintf(" %s / %s used (%s free)\n", used, total, free_);
+
+  kprintf("heap:     ");
+  print_usage_bar(heap_used_bytes(), heap_capacity_bytes(), 30);
+  kprintf(" %s / %s used\n", hused, hcap);
 
   uint64_t task_slab_allocated, task_slab_pages;
   sched_task_cache_stats(&task_slab_allocated, &task_slab_pages);
@@ -651,6 +841,7 @@ static void cmd_ps(const char *args) {
   print_left("NAME", 18);
   print_left("STATE", 11);
   kprintf("%s\n", "RING");
+  print_divider(41);
   sched_for_each_task(ps_print_one, NULL);
 }
 
@@ -714,7 +905,7 @@ static void cmd_cat(const char *args) {
   }
   struct vfs_file *f;
   if (!vfs_open(args, O_RDONLY, &f)) {
-    kprintf("cat: %s: no such file\n", args);
+    print_error("cat: %s: no such file\n", args);
     return;
   }
   char buf[257];
@@ -758,9 +949,9 @@ static void cmd_run(const char *args) {
     }
   }
   if (slot < 0) {
-    kprintf("run: job table full (%d slots) -- 'jobs' to see them, wait for "
-            "one to finish, or 'kill' one first\n",
-            MAX_JOBS);
+    print_error("run: job table full (%d slots) -- 'jobs' to see them, wait "
+                "for one to finish, or 'kill' one first\n",
+                MAX_JOBS);
     return;
   }
 
@@ -803,7 +994,7 @@ static void cmd_kill(const char *args) {
     }
   }
   if (!all_digits) {
-    kprintf("kill: '%s' isn't a pid -- see 'jobs' or 'ps'\n", args);
+    print_error("kill: '%s' isn't a pid -- see 'jobs' or 'ps'\n", args);
     return;
   }
   uint64_t pid = 0;
@@ -813,7 +1004,7 @@ static void cmd_kill(const char *args) {
 
   struct task *t = sched_find_waitable_task(pid);
   if (t == NULL) {
-    kprintf("kill: no such ring-3 task with pid %lu\n", pid);
+    print_error("kill: no such ring-3 task with pid %lu\n", pid);
     return;
   }
   sched_kill_task(t);
@@ -876,7 +1067,7 @@ static void cmd_matrix(const char *args) {
   }
 
   keyboard_flush();
-  console_set_colors(0x00E0E0E0, 0x000B0E14);
+  console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
   console_clear();
 }
 
@@ -1129,15 +1320,26 @@ static void cmd_gnodeinfo(const char *args) {
 
 static void gnode_print_one(struct gnode *n, void *arg) {
   (void)arg;
-  kprintf("  #%-6lu ", n->id);
+  char idbuf[16], sizebuf[16], edgebuf[16];
+  ksnprintf(idbuf, sizeof(idbuf), "#%lu", n->id);
+  ksnprintf(sizebuf, sizeof(sizebuf), "size=%lu", n->size);
+  ksnprintf(edgebuf, sizeof(edgebuf), "edges=%u", n->edge_count);
+
+  kprintf("  ");
+  print_left(idbuf, 9);
   print_left(n->label[0] ? n->label : "-", 20);
-  kprintf("size=%-6lu edges=%-4u refs=%u\n", n->size, n->edge_count,
-          n->refcount);
+  print_left(sizebuf, 12);
+  print_left(edgebuf, 10);
+  kprintf("refs=%u\n", n->refcount);
 }
 
 static void cmd_gnodes(const char *args) {
   (void)args;
-  kprintf("  %-7s %-20s\n", "ID", "LABEL");
+  kprintf("  ");
+  print_left("ID", 9);
+  print_left("LABEL", 20);
+  kprintf("\n");
+  print_divider(31);
   graph_for_each_node(gnode_print_one, NULL);
 }
 static void cmd_gsync(const char *args) {
@@ -1233,7 +1435,7 @@ static void dispatch(char *line) {
     }
   }
 
-  kprintf("unknown command: %s (try 'help')\n", start);
+  print_error("unknown command: %s (try 'help')\n", start);
   suggest_commands(start);
 }
 
@@ -1241,12 +1443,24 @@ void shell_task(void *arg) {
   (void)arg;
   char line[LINE_MAX];
 
-  kprintf("\nWelcome to Nexus. Type 'help' for a list of commands.\n");
+  kprintf("\n");
+  console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
+  print_box_border();
+  print_box_line(" NEXUS -- x86-64 kernel shell");
+  char status[BOX_INNER_WIDTH + 1];
+  ksnprintf(status, sizeof(status), " %u cpu(s) online, x2APIC %s", g_cpu_count,
+            lapic_using_x2apic() ? "on" : "off");
+  print_box_line(status);
+  print_box_line(" type 'help' for commands, up/down for history");
+  print_box_border();
+  console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
+  kprintf("\n");
 
   for (;;) {
     reap_finished_jobs();
     print_prompt();
     read_line(line, sizeof(line));
+    history_push(line); /* before dispatch() -- it mutates line in place */
     dispatch(line);
   }
 }
