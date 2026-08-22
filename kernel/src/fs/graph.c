@@ -666,18 +666,22 @@ void sstring_unset(const char *name) {
   kprintf("[graph] no sstring anchor named '%s'\n", name);
 }
 
-struct gnode *graph_resolve(const char *path) {
-  char comps[GRAPH_MAX_DEPTH][GEDGE_NAME_MAX];
+/* Splits `path` into up to GRAPH_MAX_DEPTH '/'-separated components --
+ * the tokenizer graph_resolve()/graph_touch()/graph_remove_path() all
+ * need (an empty component from a leading/doubled/trailing '/' is
+ * simply skipped, never stored). Factored out once a third caller
+ * needed it -- see graph_remove_path()'s own comment. */
+static int graph_split_path(const char *path, char comps[][GEDGE_NAME_MAX]) {
   int depth = 0;
-
   const char *p = path;
+
   while (*p == '/') {
     p++;
   }
   while (*p != '\0' && depth < GRAPH_MAX_DEPTH) {
     size_t n = 0;
     while (*p != '\0' && *p != '/') {
-      if (n + 1 < sizeof(comps[0])) {
+      if (n + 1 < GEDGE_NAME_MAX) {
         comps[depth][n++] = *p;
       }
       p++;
@@ -688,7 +692,12 @@ struct gnode *graph_resolve(const char *path) {
       p++;
     }
   }
+  return depth;
+}
 
+struct gnode *graph_resolve(const char *path) {
+  char comps[GRAPH_MAX_DEPTH][GEDGE_NAME_MAX];
+  int depth = graph_split_path(path, comps);
   if (depth == 0) {
     return NULL;
   }
@@ -708,26 +717,7 @@ struct gnode *graph_resolve(const char *path) {
 
 struct gnode *graph_touch(const char *path, bool *out_created) {
   char comps[GRAPH_MAX_DEPTH][GEDGE_NAME_MAX];
-  int depth = 0;
-
-  const char *p = path;
-  while (*p == '/') {
-    p++;
-  }
-  while (*p != '\0' && depth < GRAPH_MAX_DEPTH) {
-    size_t n = 0;
-    while (*p != '\0' && *p != '/') {
-      if (n + 1 < sizeof(comps[0])) {
-        comps[depth][n++] = *p;
-      }
-      p++;
-    }
-    comps[depth][n] = '\0';
-    depth++;
-    while (*p == '/') {
-      p++;
-    }
-  }
+  int depth = graph_split_path(path, comps);
 
   if (out_created != NULL) {
     *out_created = false;
@@ -745,12 +735,6 @@ struct gnode *graph_touch(const char *path, bool *out_created) {
       return NULL;
     }
     if (!sstring_set(comps[0], cur)) {
-      /* Table full -- the node exists but has no anchor pointing at
-       * it, same situation as a bare gmk nobody ever linked
-       * anywhere. Not worse than before this function existed; just
-       * not the happy path, and worth surfacing since it's
-       * surprising for what's supposed to be a one-shot
-       * create-and-reach-it call. */
       kprintf("[graph] gtouch: sstring table full -- '%s' created (#%lu) "
               "but not anchored\n",
               comps[0], cur->id);
@@ -778,6 +762,61 @@ struct gnode *graph_touch(const char *path, bool *out_created) {
     *out_created = created_any;
   }
   return cur;
+}
+
+/* The removal counterpart to graph_touch(): walks `path` down to its
+ * second-to-last component, then drops whatever reference reaches
+ * the LAST one -- sstring_unset() if the path is exactly one
+ * component (an anchor name), or graph_unlink() from its parent
+ * otherwise. That's the exact same reference graph_resolve()/
+ * graph_touch() would have walked through to reach that node, so
+ * removing it here is symmetric with how the path got there in the
+ * first place. This is what lets `grm <path>` (shell/shell.c) behave
+ * the way a real `rm` does -- act on the path, not on the node's bare
+ * refcount -- instead of requiring the caller to already know whether
+ * the thing they typed is reachable via an sstring anchor (needs
+ * sstringrm) or an edge (needs gunlink) before grm will do anything.
+ * sstring_unset()/graph_unlink() log their own outcome, including
+ * freeing whatever that was the last reference to. Returns false
+ * (having logged why) if any component along the way, including the
+ * last one, doesn't actually exist. */
+bool graph_remove_path(const char *path) {
+  char comps[GRAPH_MAX_DEPTH][GEDGE_NAME_MAX];
+  int depth = graph_split_path(path, comps);
+
+  if (depth == 0) {
+    kprintf("[graph] nothing to remove (empty path)\n");
+    return false;
+  }
+
+  if (depth == 1) {
+    if (sstring_get(comps[0]) == NULL) {
+      kprintf("[graph] no such path '%s'\n", path);
+      return false;
+    }
+    sstring_unset(comps[0]);
+    return true;
+  }
+
+  struct gnode *parent = sstring_get(comps[0]);
+  if (parent == NULL) {
+    kprintf("[graph] no such path '%s'\n", path);
+    return false;
+  }
+  for (int i = 1; i < depth - 1; i++) {
+    parent = graph_edge_lookup(parent, comps[i]);
+    if (parent == NULL) {
+      kprintf("[graph] no such path '%s'\n", path);
+      return false;
+    }
+  }
+  if (graph_edge_lookup(parent, comps[depth - 1]) == NULL) {
+    kprintf("[graph] no such path '%s'\n", path);
+    return false;
+  }
+
+  graph_unlink(parent, comps[depth - 1]);
+  return true;
 }
 
 /* ============================== persistence ============================== */

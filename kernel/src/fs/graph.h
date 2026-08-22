@@ -1,8 +1,8 @@
 #ifndef NEXUS_GRAPH_H
 #define NEXUS_GRAPH_H
 
-#include "klib/klib.h"
 #include "fs/vfs.h"
+#include "klib/klib.h"
 
 #define GNODE_LABEL_MAX 64
 #define GEDGE_NAME_MAX 64
@@ -118,6 +118,7 @@ void graph_node_release(struct gnode *n);
 
 struct gnode *graph_resolve(const char *path);
 struct gnode *graph_touch(const char *path, bool *out_created);
+bool graph_remove_path(const char *path);
 struct gnode *graph_find_by_id(uint64_t id);
 void graph_for_each_node(void (*fn)(struct gnode *n, void *arg), void *arg);
 

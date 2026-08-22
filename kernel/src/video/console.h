@@ -2,6 +2,7 @@
 #define NEXUS_CONSOLE_H
 
 #include "klib/klib.h"
+#include "video/nx_box8x8.h"
 
 /* Shared 0x00RRGGBB color constants for kernel-side UI chrome (boot
  * splash, shell prompt/box-drawing, ...) built on top of
@@ -38,6 +39,16 @@ uint32_t console_rows(void);
  * -- callers that draw this way are already managing the screen
  * themselves. */
 void console_putc_at(uint32_t col, uint32_t row, char c);
+
+/* Box-drawing counterparts to console_putc()/console_putc_at() -- see
+ * video/nx_box8x8.h for exactly which 22 glyphs and why these are
+ * separate, explicitly-named entry points rather than something that
+ * flows through console_putc()'s ordinary `char` pipeline (there's no
+ * UTF-8 decoding anywhere in this kernel, and these aren't ASCII).
+ * Same cell size, same suspended/bounds behavior as their console_putc*
+ * equivalents. */
+void console_putc_box(enum nx_box_glyph g);
+void console_putc_box_at(uint32_t col, uint32_t row, enum nx_box_glyph g);
 
 /* Suspends (or resumes) console_putc()/console_puts()/
  * console_backspace() actually drawing anything -- kprintf() itself
