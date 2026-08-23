@@ -123,6 +123,19 @@ static void echo_backspace(void) {
   console_backspace();
 }
 
+/* console_putc_box() (video/console.c) only ever draws to the
+ * framebuffer console -- unlike kprintf(), it has no serial mirror
+ * (see debug/log.c's kprintf(), which writes to both), so a plain
+ * `debug=serial` boot or any other framebuffer-less run would lose
+ * every border character drawn straight through it, leaving gaps
+ * where the borders below should be. This mirrors a close ASCII
+ * equivalent to serial alongside the real Unicode glyph, so serial
+ * output still reads as a recognisable table/box instead of holes. */
+static void box_putc(enum nx_box_glyph g, char serial_fallback) {
+  serial_putc(serial_fallback);
+  console_putc_box(g);
+}
+
 static const char *skip_spaces(const char *s) {
   while (*s == ' ') {
     s++;
@@ -156,19 +169,22 @@ static void print_left(const char *s, int width) {
  * so they read as a header, not just another row. */
 static void print_divider(uint32_t width) {
   for (uint32_t i = 0; i < width; i++) {
-    kprintf("-");
+    box_putc(NX_BOX_H, '-');
   }
   kprintf("\n");
 }
 
 #define BOX_INNER_WIDTH 54
 
-/* One line of a simple ASCII box -- "| text...padding |" -- padded/
- * truncated to exactly BOX_INNER_WIDTH columns so every border lines
- * up regardless of what's inside. font8x8_basic has no real box-
- * drawing glyphs, so plain -, |, + are the whole toolkit here. */
+/* One line of the banner box -- "U+2551 text...padding U+2551" --
+ * padded/truncated to exactly BOX_INNER_WIDTH columns so every border
+ * lines up regardless of what's inside. video/nx_box8x8.h added real
+ * double-line box-drawing glyphs a while back; this is the first
+ * thing in the shell to actually use them instead of falling back to
+ * plain -, |, +. */
 static void print_box_line(const char *text) {
-  kprintf("| ");
+  box_putc(NX_BOX_DBL_V, '|');
+  kprintf(" ");
   uint32_t n = 0;
   for (const char *p = text; *p != '\0' && n < BOX_INNER_WIDTH - 1; p++, n++) {
     kprintf("%c", *p);
@@ -176,15 +192,30 @@ static void print_box_line(const char *text) {
   for (uint32_t i = n; i < BOX_INNER_WIDTH; i++) {
     kprintf(" ");
   }
-  kprintf("|\n");
+  box_putc(NX_BOX_DBL_V, '|');
+  kprintf("\n");
 }
 
-static void print_box_border(void) {
-  kprintf("+");
+/* Double-line box glyphs have different corners top vs bottom (U+2554
+ * and U+2557 vs U+255A and U+255D) unlike the old ASCII '+', which was
+ * the same character everywhere -- hence two functions instead of one
+ * shared by both. */
+static void print_box_border_top(void) {
+  box_putc(NX_BOX_DBL_DR, '+');
   for (uint32_t i = 0; i < BOX_INNER_WIDTH + 1; i++) {
-    kprintf("-");
+    box_putc(NX_BOX_DBL_H, '-');
   }
-  kprintf("+\n");
+  box_putc(NX_BOX_DBL_DL, '+');
+  kprintf("\n");
+}
+
+static void print_box_border_bottom(void) {
+  box_putc(NX_BOX_DBL_UR, '+');
+  for (uint32_t i = 0; i < BOX_INNER_WIDTH + 1; i++) {
+    box_putc(NX_BOX_DBL_H, '-');
+  }
+  box_putc(NX_BOX_DBL_UL, '+');
+  kprintf("\n");
 }
 
 /* Same idea as kprintf(), but in the shared "something's wrong" color
@@ -916,25 +947,75 @@ static void cmd_uptime(const char *args) {
           ms % 1000);
 }
 
+#define PS_COL_PID 4
+#define PS_COL_NAME 18
+#define PS_COL_STATE 9
+#define PS_COL_RING 6
+
+/* Draws one full horizontal rule of the `ps` table -- top border,
+ * header divider, or bottom border, depending which corner/junction
+ * glyphs the caller passes in (U+250C/U+252C/U+2510 for the top,
+ * U+251C/U+253C/U+2524 for the header divider, U+2514/U+2534/U+2518
+ * for the bottom -- see video/nx_box8x8.h). `+2` per column accounts
+ * for the one space of padding print_ps_row() puts on each side of a
+ * cell's content. */
+static void ps_table_rule(enum nx_box_glyph left, enum nx_box_glyph mid,
+                          enum nx_box_glyph right, enum nx_box_glyph fill) {
+  static const uint32_t widths[] = {PS_COL_PID, PS_COL_NAME, PS_COL_STATE,
+                                    PS_COL_RING};
+  box_putc(left, '+');
+  for (size_t c = 0; c < ARRAY_LEN(widths); c++) {
+    for (uint32_t i = 0; i < widths[c] + 2; i++) {
+      box_putc(fill, '-');
+    }
+    box_putc((c + 1 < ARRAY_LEN(widths)) ? mid : right, '+');
+  }
+  kprintf("\n");
+}
+
+/* One row of the `ps` table -- used for both the header (literal
+ * "PID"/"NAME"/... strings) and every task row, so the two can never
+ * drift out of alignment with each other. */
+static void ps_table_row(const char *pid, const char *name, const char *state,
+                         const char *ring) {
+  box_putc(NX_BOX_V, '|');
+  kprintf(" ");
+  print_left(pid, PS_COL_PID);
+  kprintf(" ");
+  box_putc(NX_BOX_V, '|');
+  kprintf(" ");
+  print_left(name, PS_COL_NAME);
+  kprintf(" ");
+  box_putc(NX_BOX_V, '|');
+  kprintf(" ");
+  print_left(state, PS_COL_STATE);
+  kprintf(" ");
+  box_putc(NX_BOX_V, '|');
+  kprintf(" ");
+  print_left(ring, PS_COL_RING);
+  kprintf(" ");
+  box_putc(NX_BOX_V, '|');
+  kprintf("\n");
+}
+
 static void ps_print_one(struct task *t, void *arg) {
   (void)arg;
   static const char *state_names[] = {
       "ready", "running", "sleeping", "blocked", "exiting", "dead",
   };
-  kprintf("  %4lu  ", t->id);
-  print_left(t->name, 18);
-  print_left(state_names[t->state], 11);
-  kprintf("%s\n", t->is_user ? "user" : "kernel");
+  char pidbuf[16];
+  ksnprintf(pidbuf, sizeof(pidbuf), "%lu", t->id);
+  ps_table_row(pidbuf, t->name, state_names[t->state],
+               t->is_user ? "user" : "kernel");
 }
 
 static void cmd_ps(const char *args) {
   (void)args;
-  kprintf("  %4s  ", "PID");
-  print_left("NAME", 18);
-  print_left("STATE", 11);
-  kprintf("%s\n", "RING");
-  print_divider(41);
+  ps_table_rule(NX_BOX_DR, NX_BOX_HD, NX_BOX_DL, NX_BOX_H);
+  ps_table_row("PID", "NAME", "STATE", "RING");
+  ps_table_rule(NX_BOX_VR, NX_BOX_VH, NX_BOX_VL, NX_BOX_H);
   sched_for_each_task(ps_print_one, NULL);
+  ps_table_rule(NX_BOX_UR, NX_BOX_HU, NX_BOX_UL, NX_BOX_H);
 }
 
 static void cmd_lspci(const char *args) {
@@ -1622,14 +1703,14 @@ void shell_task(void *arg) {
 
   kprintf("\n");
   console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
-  print_box_border();
+  print_box_border_top();
   print_box_line(" NEXUS -- x86-64 kernel shell");
   char status[BOX_INNER_WIDTH + 1];
   ksnprintf(status, sizeof(status), " %u cpu(s) online, x2APIC %s", g_cpu_count,
             lapic_using_x2apic() ? "on" : "off");
   print_box_line(status);
   print_box_line(" type 'help' for commands, up/down for history");
-  print_box_border();
+  print_box_border_bottom();
   console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
   kprintf("\n");
 
