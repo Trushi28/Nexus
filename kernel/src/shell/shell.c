@@ -1,5 +1,6 @@
 #include "shell/shell.h"
 #include "abi/syscall_nr.h"
+#include "acpi/acpi.h"
 #include "apic/lapic.h"
 #include "boot/requests.h"
 #include "cpu/cpu.h"
@@ -21,13 +22,12 @@
 #include "video/fb.h"
 
 #define LINE_MAX 200
-#define CMD_NAME_MAX 16 /* longest canonical command name + slop */
+#define CMD_NAME_MAX 16 // longest canonical command name + slop
 #define WORD_MAX                                                               \
-  24 /* edit_distance() operates on at most this many chars per word */
-#define SUGGEST_MAX 3 /* "did you mean" shows at most this many */
-#define SUGGEST_DIST_MAX                                                       \
-  3 /* beyond this edit distance, don't bother suggesting */
-#define COMPLETE_MAX_MATCHES 32 /* tab-completion candidate cap */
+  24 // edit_distance() operates on at most this many chars per word
+#define SUGGEST_MAX 3      /* "did you mean" shows at most this many */
+#define SUGGEST_DIST_MAX 3 // beyond this edit distance, don't bother suggesting
+#define COMPLETE_MAX_MATCHES 32 // tab-completion candidate cap
 
 /* ------------------------------ working directory -------------------------
  * A real per-process cwd would live on struct task (sched/sched.h) and
@@ -292,6 +292,7 @@ static void cmd_jobs(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_matrix(const char *args);
 static void cmd_reboot(const char *args);
+static void cmd_shutdown(const char *args);
 static void cmd_aliases(const char *args);
 static void cmd_topcmds(const char *args);
 static void cmd_gmk(const char *args);
@@ -323,18 +324,25 @@ struct shell_synonym {
 };
 
 static const struct shell_synonym synonyms[] = {
-    {"list", "ls"},          {"dir", "ls"},       {"type", "cat"},
-    {"read", "cat"},         {"exec", "run"},     {"spawn", "run"},
-    {"start", "run"},        {"tasks", "ps"},     {"procs", "ps"},
-    {"who", "ps"},           {"cls", "clear"},    {"clr", "clear"},
-    {"devices", "lspci"},    {"pci", "lspci"},    {"ver", "uname"},
-    {"version", "uname"},    {"mem", "meminfo"},  {"free", "meminfo"},
-    {"cpu", "cpuinfo"},      {"say", "echo"},     {"nodes", "gnodes"},
-    {"anchors", "sstrings"}, {"link", "glink"},   {"mk", "gmk"},
-    {"new", "gmk"},          {"write", "gwrite"}, {"info", "gnodeinfo"},
-    {"save", "gsync"},       {"load", "gload"},   {"rm", "grm"},
-    {"del", "grm"},          {"delete", "grm"},   {"unlink", "gunlink"},
-    {"wipe", "gclear"},      {"touch", "gtouch"}, {"gc", "ggc"},
+    {"list", "ls"},           {"dir", "ls"},
+    {"type", "cat"},          {"read", "cat"},
+    {"exec", "run"},          {"spawn", "run"},
+    {"start", "run"},         {"tasks", "ps"},
+    {"procs", "ps"},          {"who", "ps"},
+    {"cls", "clear"},         {"clr", "clear"},
+    {"devices", "lspci"},     {"pci", "lspci"},
+    {"ver", "uname"},         {"version", "uname"},
+    {"mem", "meminfo"},       {"free", "meminfo"},
+    {"cpu", "cpuinfo"},       {"say", "echo"},
+    {"nodes", "gnodes"},      {"anchors", "sstrings"},
+    {"link", "glink"},        {"mk", "gmk"},
+    {"new", "gmk"},           {"write", "gwrite"},
+    {"info", "gnodeinfo"},    {"save", "gsync"},
+    {"load", "gload"},        {"rm", "grm"},
+    {"del", "grm"},           {"delete", "grm"},
+    {"unlink", "gunlink"},    {"wipe", "gclear"},
+    {"touch", "gtouch"},      {"gc", "ggc"},
+    {"poweroff", "shutdown"}, {"halt", "shutdown"},
 };
 
 static const char *normalize_verb(const char *verb, char *scratch,
@@ -377,6 +385,10 @@ static struct shell_command commands[] = {
     {"matrix", cmd_matrix, "", "you know the one -- any key to stop", NULL, 0},
     {"reboot", cmd_reboot, "",
      "save if dirty,then reset the machine (8042 controller pulse)", NULL, 0},
+    {"shutdown", cmd_shutdown, "",
+     "save if dirty, then power off via ACPI (falls back to a QEMU-only "
+     "hack, then a plain halt, if ACPI shutdown isn't available)",
+     NULL, 0},
     {"aliases", cmd_aliases, "", "list command shortcuts (list==ls, etc)", NULL,
      0},
     {"topcmds", cmd_topcmds, "", "your most-used commands, most frecent first",
@@ -1291,6 +1303,18 @@ static void cmd_reboot(const char *args) {
   } while (status & 0x02);
   outb(0x64, 0xFE);
   hang();
+}
+
+static void cmd_shutdown(const char *args) {
+  (void)args;
+  if (graph_is_dirty()) {
+    kprintf("graph has unsaved changes -- saving before shutdown...\n");
+    graph_save_to_disk();
+  }
+  kprintf("shutting down...\n");
+  timer_busy_wait_ms(50);
+  acpi_shutdown(); /* never returns -- real ACPI / QEMU-hack / halt
+                       fallback chain lives in acpi.c */
 }
 
 static void cmd_aliases(const char *args) {
