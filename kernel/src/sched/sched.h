@@ -23,6 +23,25 @@ struct task {
   size_t kernel_stack_pages;
 
   uint64_t id;
+  uint32_t uid; /* this task's clearance -- 0 is root/unrestricted and
+                   bypasses every ownership check in the kernel (see
+                   cpu/syscall.c's sys_kill_impl for the first real
+                   consumer). Kernel tasks (task_create()) are always
+                   uid 0 -- they're compiled into the kernel image
+                   itself, not attacker-influenced content, so there's
+                   nothing to restrict them from. A ring-3 task
+                   (task_create_user()) is handed an explicit uid at
+                   creation time by whoever's spawning it: process_spawn()
+                   threads one through from its own caller (see that
+                   function's own comment), split()/exec() (cpu/syscall.c)
+                   both inherit the calling task's CURRENT uid unchanged
+                   -- exactly like a real fork/exec's default, no
+                   POSIX setuid-binary equivalent exists here. The only
+                   way a task's uid ever changes after creation is a
+                   successful sys_setuid_impl() call, which is
+                   deliberately one-way (root can drop to anything;
+                   nothing can climb back up) -- see abi/syscall_nr.h's
+                   SYS_setuid comment. */
   char name[32];
   enum task_state state;
 
@@ -64,9 +83,12 @@ void sched_init(void);
 
 struct task *task_create(const char *name, task_entry_t entry, void *arg);
 
+/* `uid` is the clearance this task starts with -- see struct
+ * task::uid's own comment for who's responsible for choosing it and
+ * why there's no default. */
 struct task *task_create_user(const char *name, uint64_t cr3_phys,
                               uint64_t entry, uint64_t user_stack_top,
-                              uint64_t arg0, uint64_t arg1);
+                              uint64_t arg0, uint64_t arg1, uint32_t uid);
 
 void task_publish(struct task *t);
 

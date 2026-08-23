@@ -224,11 +224,6 @@ static void sys_open_impl(struct interrupt_frame *f) {
   }
 
   if ((flags & O_TRUNC) != 0 && !vfs_truncate(file)) {
-    /* Asked for O_TRUNC but the filesystem behind this path can't
-     * do it (no writable filesystem exists in v1 besides tmpfs, so
-     * this is unreachable today -- kept as a real check, not an
-     * assert, so a future read-only mount fails the open cleanly
-     * instead of silently ignoring the flag). */
     vfs_close(file);
     f->rax = (uint64_t)-1;
     return;
@@ -252,6 +247,34 @@ static void sys_close_impl(struct interrupt_frame *f) {
 
 static void sys_getpid_impl(struct interrupt_frame *f) {
   f->rax = this_cpu()->current_task->id;
+}
+
+static void sys_getuid_impl(struct interrupt_frame *f) {
+  f->rax = this_cpu()->current_task->uid;
+}
+
+/* Root-only, one-way privilege drop -- see abi/syscall_nr.h's
+ * SYS_setuid comment for why this is deliberately simpler than a real
+ * setuid()/seteuid()/setresuid() triad: Nexus has no user database,
+ * no login, no concept of "which uids are allowed to become which
+ * other uids" beyond "uid 0 can become anything, nothing else can
+ * become anything at all." A process that drops its own privilege
+ * this way can never get it back -- there's no saved-uid to restore
+ * from -- which is exactly the point: the intended use is a
+ * root-launched process voluntarily narrowing itself (see nsh's
+ * `drop` command) right before doing something it doesn't want to
+ * fully trust itself with, not a general identity-switching
+ * mechanism. */
+static void sys_setuid_impl(struct interrupt_frame *f) {
+  struct task *caller = this_cpu()->current_task;
+  uint32_t requested = (uint32_t)f->rdi;
+
+  if (caller->uid != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  caller->uid = requested;
+  f->rax = 0;
 }
 
 static void sys_sleep_ms_impl(struct interrupt_frame *f) {
@@ -293,15 +316,6 @@ static void sys_brk_impl(struct interrupt_frame *f) {
     for (uint64_t va = old_top; va < new_top; va += PAGE_SIZE) {
       uint64_t phys = pmm_alloc_page();
       if (phys == 0) {
-        /* Out of memory partway through growing. Every page mapped
-         * by earlier loop iterations stays mapped and IS accounted
-         * for -- t->brk tracks exactly how far we actually got, one
-         * page at a time, rather than jumping straight to `req` only
-         * on full success. Without this, a later retry would recompute
-         * old_top from the stale (unmoved) t->brk, walk over
-         * already-mapped virtual addresses again, and overwrite their
-         * PTEs with freshly allocated pages -- leaking the physical
-         * frames mapped there the first time around. */
         f->rax = t->brk;
         return;
       }
@@ -310,10 +324,6 @@ static void sys_brk_impl(struct interrupt_frame *f) {
       t->brk = va + PAGE_SIZE;
     }
   } else if (new_top < old_top) {
-    /* Actually give the released pages back, unlike the old
-     * "just move the pointer and leave everything mapped" behaviour
-     * -- see vmm_unmap_range_in()'s comment for why only a local
-     * invlpg is needed here (no cross-cpu shootdown). */
     vmm_unmap_range_in(t->cr3_phys, new_top, old_top - new_top);
   }
 
@@ -353,6 +363,7 @@ static void sys_readdir_impl(struct interrupt_frame *f) {
   }
   f->rax = 0;
 }
+
 static void sys_spawn_impl(struct interrupt_frame *f) {
   uint64_t path_va = f->rdi;
 
@@ -363,29 +374,17 @@ static void sys_spawn_impl(struct interrupt_frame *f) {
     return;
   }
 
-  struct task *t = process_spawn(path, path);
+  /* Same default an ordinary fork/exec makes: a spawned child
+   * inherits the SPAWNING task's own clearance, not root's --
+   * credentials only ever change via an explicit sys_setuid_impl()
+   * call, or the kernel shell's own `runas`, which calls
+   * process_spawn() directly with an explicit uid instead of going
+   * through this syscall at all (see shell/shell.c's cmd_runas()). */
+  struct task *caller = this_cpu()->current_task;
+  struct task *t = process_spawn(path, path, caller->uid);
   f->rax = (t != NULL) ? t->id : (uint64_t)-1;
 }
 
-/* exec(): replaces the calling process's own image in place -- same
- * pid, same open fds, fresh address space and entry point. The
- * mechanism is simply rewriting f->rip/f->rsp before returning: the
- * ordinary syscall return path (isr_common_stub's iretq, back in
- * cpu/isr.c) resumes execution wherever the interrupt frame says to,
- * so pointing it at the new image's entry/stack IS "return into a
- * different program" -- no scheduler involvement needed, since the
- * calling task never actually blocks or gets switched away.
- *
- * Builds and fully populates a BRAND NEW address space first --
- * validating the target ELF and mapping its stack there -- and only
- * commits (switches CR3, frees the old address space) once every one
- * of those steps has succeeded. That ordering is what gives a failed
- * exec() the same guarantee a real one has: the calling process is
- * left exactly as runnable as it was before the call. Open fds are
- * deliberately left alone -- exec() replaces the image, not the
- * process's other state, matching a real exec()'s default
- * (close-on-exec is opt-in there too; Nexus just doesn't have a
- * per-fd flag for it yet). No argv/envp in v1 -- see docs/Design.md. */
 static void sys_exec_impl(struct interrupt_frame *f) {
   uint64_t path_va = f->rdi;
 
@@ -444,36 +443,22 @@ static void sys_exec_impl(struct interrupt_frame *f) {
     vmm_map_page_in(new_pml4, va, phys, VMM_WRITABLE | VMM_USER | VMM_NX);
   }
 
-  /* Everything the new image needs is mapped and ready -- commit.
-   * Past this point exec() cannot fail; the old address space is
-   * about to be torn down for real. */
+  /* Note: exec() does NOT touch uid -- the credential belongs to the
+   * process, not the image, exactly like a real exec() with no setuid
+   * bit involved. */
   struct task *t = this_cpu()->current_task;
   uint64_t old_pml4 = t->cr3_phys;
 
-  write_cr3(new_pml4); /* must happen before the iretq at the bottom of
-                           this syscall, which returns straight into
-                           the NEW image */
+  write_cr3(new_pml4);
   t->cr3_phys = new_pml4;
   t->brk_start = ALIGN_UP(elf.highest_vaddr, PAGE_SIZE);
   t->brk = t->brk_start;
 
-  /* Cosmetic, but worth doing while we're here -- keeps `ps` honest
-   * about what a task is actually running post-exec, the same way a
-   * real kernel updates a process's comm/argv[0]. */
   strncpy(t->name, path, sizeof(t->name) - 1);
   t->name[sizeof(t->name) - 1] = '\0';
 
-  /* The old address space is provably no longer in use anywhere: this
-   * task only ever runs on one CPU at a time, CR3 was just switched
-   * away from it on that one CPU, and no other task shares it --
-   * every process gets its own (see USER_STACK_TOP's comment in
-   * proc/process.h). Safe to reclaim right now. */
   vmm_free_user_space(old_pml4);
 
-  /* f->rax is irrelevant: nothing ever returns to the u_exec() call
-   * site that issued this syscall to read it, exactly like a real
-   * exec(). cs/ss/rflags are already correct -- we were already in
-   * ring 3 to get here. */
   f->rip = elf.entry;
   f->rsp = stack_top;
 }
@@ -496,8 +481,17 @@ static void sys_split_impl(struct interrupt_frame *f) {
     return;
   }
 
-  struct task *child = task_create_user(parent->name, new_pml4, trampoline_va,
-                                        USER_STACK_TOP, arg, entry_va);
+  struct task *child =
+      task_create_user(parent->name, new_pml4, trampoline_va, USER_STACK_TOP,
+                       arg, entry_va, parent->uid); /* split()'s child
+                                                        inherits the
+                                                        SAME clearance
+                                                        as the parent --
+                                                        it's still the
+                                                        same logical
+                                                        process, just a
+                                                        second thread of
+                                                        control */
   if (child == NULL) {
     vmm_free_user_space(new_pml4);
     f->rax = (uint64_t)-1;
@@ -521,9 +515,7 @@ static void sys_split_impl(struct interrupt_frame *f) {
     }
   }
 
-  task_publish(child); /* only now that fds/brk/parent/name are fully
-                           set -- see task_publish()'s comment in
-                           sched.h */
+  task_publish(child);
   f->rax = child->id;
 }
 
@@ -540,10 +532,6 @@ static void sys_wait_impl(struct interrupt_frame *f) {
   f->rax = (uint64_t)(int64_t)code;
 }
 
-/* wait_any(): see sched_wait_any()'s own comment (sched/sched.h) for
- * the full contract. `code_out_va == 0` (NULL) is explicitly allowed
- * and means "the caller doesn't care about the exit code" -- the
- * child is still reaped either way, only the code is skipped. */
 static void sys_wait_any_impl(struct interrupt_frame *f) {
   uint64_t code_out_va = f->rdi;
 
@@ -561,16 +549,20 @@ static void sys_wait_any_impl(struct interrupt_frame *f) {
 
   if (code_out_va != 0 &&
       copy_to_user((void *)code_out_va, &code, sizeof(code)) != 0) {
-    /* The child is already reaped by this point -- a bad pointer
-     * here loses the caller its exit code, not the reap itself.
-     * Same "the real work already happened" tradeoff sys_ps_impl()
-     * makes for its own copy_to_user() failure. */
     f->rax = (uint64_t)-1;
     return;
   }
   f->rax = (uint64_t)pid;
 }
 
+/* kill() now enforces the same clearance boundary as every other
+ * cross-task operation added this turn: root (uid 0) may signal
+ * anything; anyone else may only signal a task with their OWN uid.
+ * sched_find_waitable_task() already refuses anything that isn't
+ * "waitable" (kernel tasks -- the shell, gautosave, blockdev init --
+ * never are, see task_create()), so this closes the remaining gap:
+ * two DIFFERENT ring-3 processes could previously kill() each other
+ * freely just by knowing a pid, with no ownership concept at all. */
 static void sys_kill_impl(struct interrupt_frame *f) {
   uint64_t pid = f->rdi;
 
@@ -579,6 +571,18 @@ static void sys_kill_impl(struct interrupt_frame *f) {
     f->rax = (uint64_t)-1;
     return;
   }
+
+  struct task *caller = this_cpu()->current_task;
+  if (caller->uid != 0 && caller->uid != t->uid) {
+    /* Same -1 a nonexistent pid gets -- this ABI has no errno, so
+     * there's no clean way to distinguish "no such task" from "not
+     * yours" anyway, and not distinguishing them means a restricted
+     * process can't use kill() to probe which pids exist elsewhere
+     * in the system. */
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
   sched_kill_task(t);
   f->rax = 0;
 }
@@ -602,6 +606,7 @@ static void ps_lookup_one(struct task *t, void *arg) {
     ctx->info.name[sizeof(ctx->info.name) - 1] = '\0';
     ctx->info.state = (uint32_t)t->state;
     ctx->info.is_user = t->is_user ? 1 : 0;
+    ctx->info.uid = t->uid;
     ctx->found = true;
   }
   ctx->seen++;
@@ -691,6 +696,12 @@ static void syscall_dispatch(struct interrupt_frame *f) {
     break;
   case SYS_kill:
     sys_kill_impl(f);
+    break;
+  case SYS_getuid:
+    sys_getuid_impl(f);
+    break;
+  case SYS_setuid:
+    sys_setuid_impl(f);
     break;
   default:
     kprintf("[syscall] pid %lu made unknown syscall %lu\n",

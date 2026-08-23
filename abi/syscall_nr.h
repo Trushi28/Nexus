@@ -38,7 +38,9 @@
 #define SYS_exec 15 // exec(path) -> never returns on success, -1 on failure
 #define SYS_split 16 // split(trampoline, entry, arg) -> child pid, or -1
 #define SYS_wait_any 17 // wait_any(int *code_out) -> pid of whichever child exited, or -1 if none left
-#define SYS_COUNT 18
+#define SYS_getuid 18 // getuid() -> calling task's clearance (0 == root -- see docs/Design.md's clearance note)
+#define SYS_setuid 19 // setuid(uid) -> 0 on success, -1 on refusal. Root-only, one-way drop -- see cpu/syscall.c's sys_setuid_impl.
+#define SYS_COUNT 20
 
 /* open() flags -- deliberately tiny; no O_APPEND yet. */
 #define O_RDONLY 0x0

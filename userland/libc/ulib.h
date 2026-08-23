@@ -24,6 +24,8 @@ void u_itoa(int val, char *buf);
 int u_atoi(const char *s);
 
 int u_getpid(void);
+unsigned u_getuid(void);
+int u_setuid(unsigned uid);
 void u_sleep_ms(unsigned ms);
 unsigned u_uptime_ms(void);
 

@@ -8,7 +8,7 @@
 #include "proc/elf.h"
 #include "sched/sched.h"
 
-struct task *process_spawn(const char *path, const char *name) {
+struct task *process_spawn(const char *path, const char *name, uint32_t uid) {
   struct vfs_file *file;
   if (!vfs_open(path, O_RDONLY, &file)) {
     kprintf("run: %s: no such file\n", path);
@@ -58,7 +58,8 @@ struct task *process_spawn(const char *path, const char *name) {
     vmm_map_page_in(pml4, va, phys, VMM_WRITABLE | VMM_USER | VMM_NX);
   }
 
-  struct task *t = task_create_user(name, pml4, elf.entry, stack_top, 0, 0);
+  struct task *t =
+      task_create_user(name, pml4, elf.entry, stack_top, 0, 0, uid);
   if (t == NULL) {
     vmm_free_user_space(pml4);
     return NULL;
@@ -66,8 +67,8 @@ struct task *process_spawn(const char *path, const char *name) {
 
   t->brk_start = ALIGN_UP(elf.highest_vaddr, PAGE_SIZE);
   t->brk = t->brk_start;
-  task_publish(t); /* only now, with brk_start/brk already set -- see
-                       task_publish()'s comment in sched.h */
+  task_publish(t); /* only now, with brk_start/parent/fds already set --
+                       see task_publish()'s comment in sched.h */
   return t;
 }
 

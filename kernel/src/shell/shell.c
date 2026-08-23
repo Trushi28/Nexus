@@ -288,6 +288,7 @@ static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
 static void cmd_cd(const char *args);
 static void cmd_run(const char *args);
+static void cmd_runas(const char *args);
 static void cmd_jobs(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_matrix(const char *args);
@@ -378,6 +379,10 @@ static struct shell_command commands[] = {
     {"run", cmd_run, "<path> [&]",
      "load and run an ELF binary in ring 3 (append & to background it)", NULL,
      0},
+    {"runas", cmd_runas, "<uid> <path> [&]",
+     "like 'run', but spawns at an explicit clearance instead of "
+     "root's (see 'whoami'/'drop' in nsh)",
+     NULL, 0},
     {"jobs", cmd_jobs, "", "list background jobs spawned with 'run ... &'",
      NULL, 0},
     {"kill", cmd_kill, "<pid>",
@@ -963,6 +968,7 @@ static void cmd_uptime(const char *args) {
 #define PS_COL_NAME 18
 #define PS_COL_STATE 9
 #define PS_COL_RING 6
+#define PS_COL_UID 5
 
 /* Draws one full horizontal rule of the `ps` table -- top border,
  * header divider, or bottom border, depending which corner/junction
@@ -974,7 +980,7 @@ static void cmd_uptime(const char *args) {
 static void ps_table_rule(enum nx_box_glyph left, enum nx_box_glyph mid,
                           enum nx_box_glyph right, enum nx_box_glyph fill) {
   static const uint32_t widths[] = {PS_COL_PID, PS_COL_NAME, PS_COL_STATE,
-                                    PS_COL_RING};
+                                    PS_COL_RING, PS_COL_UID};
   box_putc(left, '+');
   for (size_t c = 0; c < ARRAY_LEN(widths); c++) {
     for (uint32_t i = 0; i < widths[c] + 2; i++) {
@@ -989,7 +995,7 @@ static void ps_table_rule(enum nx_box_glyph left, enum nx_box_glyph mid,
  * "PID"/"NAME"/... strings) and every task row, so the two can never
  * drift out of alignment with each other. */
 static void ps_table_row(const char *pid, const char *name, const char *state,
-                         const char *ring) {
+                         const char *ring, const char *uid) {
   box_putc(NX_BOX_V, '|');
   kprintf(" ");
   print_left(pid, PS_COL_PID);
@@ -1007,6 +1013,10 @@ static void ps_table_row(const char *pid, const char *name, const char *state,
   print_left(ring, PS_COL_RING);
   kprintf(" ");
   box_putc(NX_BOX_V, '|');
+  kprintf(" ");
+  print_left(uid, PS_COL_UID);
+  kprintf(" ");
+  box_putc(NX_BOX_V, '|');
   kprintf("\n");
 }
 
@@ -1015,16 +1025,17 @@ static void ps_print_one(struct task *t, void *arg) {
   static const char *state_names[] = {
       "ready", "running", "sleeping", "blocked", "exiting", "dead",
   };
-  char pidbuf[16];
+  char pidbuf[16], uidbuf[16];
   ksnprintf(pidbuf, sizeof(pidbuf), "%lu", t->id);
+  ksnprintf(uidbuf, sizeof(uidbuf), "%u", t->uid);
   ps_table_row(pidbuf, t->name, state_names[t->state],
-               t->is_user ? "user" : "kernel");
+               t->is_user ? "user" : "kernel", uidbuf);
 }
 
 static void cmd_ps(const char *args) {
   (void)args;
   ps_table_rule(NX_BOX_DR, NX_BOX_HD, NX_BOX_DL, NX_BOX_H);
-  ps_table_row("PID", "NAME", "STATE", "RING");
+  ps_table_row("PID", "NAME", "STATE", "RING", "UID");
   ps_table_rule(NX_BOX_VR, NX_BOX_VH, NX_BOX_VL, NX_BOX_H);
   sched_for_each_task(ps_print_one, NULL);
   ps_table_rule(NX_BOX_UR, NX_BOX_HU, NX_BOX_UL, NX_BOX_H);
@@ -1128,9 +1139,14 @@ static void cmd_cd(const char *args) {
   cwd[sizeof(cwd) - 1] = '\0';
 }
 
-static void cmd_run(const char *args) {
+/* Shared implementation behind cmd_run() (always spawns at uid 0 --
+ * the kernel shell itself is trusted/root) and cmd_runas() (spawns at
+ * an explicit, possibly-restricted uid instead). Identical background-
+ * job handling either way; only the credential handed to
+ * process_spawn() differs. */
+static void spawn_command(const char *args, uint32_t uid, const char *usage) {
   if (*args == '\0') {
-    kprintf("usage: run <path> [&]\n");
+    kprintf("%s", usage);
     return;
   }
 
@@ -1145,7 +1161,7 @@ static void cmd_run(const char *args) {
   strncpy(pathbuf, resolved, sizeof(pathbuf) - 1);
   pathbuf[sizeof(pathbuf) - 1] = '\0';
 
-  struct task *t = process_spawn(pathbuf, pathbuf);
+  struct task *t = process_spawn(pathbuf, pathbuf, uid);
   if (t == NULL) {
     return;
   }
@@ -1176,9 +1192,42 @@ static void cmd_run(const char *args) {
   strncpy(jobs[slot].name, pathbuf, sizeof(jobs[slot].name) - 1);
   jobs[slot].name[sizeof(jobs[slot].name) - 1] = '\0';
 
-  kprintf("[%u] pid %lu\n", jobs[slot].job_id, t->id);
+  kprintf("[%u] pid %lu (uid %u)\n", jobs[slot].job_id, t->id, uid);
 }
 
+static void cmd_run(const char *args) {
+  spawn_command(args, 0, "usage: run <path> [&]\n");
+}
+
+/* Splits off a leading "<uid> " token, then hands the rest to
+ * spawn_command(). The kernel shell is always root -- nothing gates
+ * it, it's the one task every other clearance check in this kernel is
+ * defined relative to -- so it's free to spawn a process at ANY uid
+ * directly, no setuid() dance required, unlike a ring-3 process, which
+ * can only ever narrow its OWN privilege (see cpu/syscall.c's
+ * sys_setuid_impl and nsh's `drop`). */
+static void cmd_runas(const char *args) {
+  const char *p = skip_spaces(args);
+  bool all_digits = (*p != '\0');
+  const char *q = p;
+  while (*q && *q != ' ') {
+    if (*q < '0' || *q > '9') {
+      all_digits = false;
+    }
+    q++;
+  }
+  if (!all_digits) {
+    kprintf("usage: runas <uid> <path> [&]\n");
+    return;
+  }
+
+  uint32_t uid = 0;
+  for (const char *d = p; d < q; d++) {
+    uid = uid * 10 + (uint32_t)(*d - '0');
+  }
+
+  spawn_command(skip_spaces(q), uid, "usage: runas <uid> <path> [&]\n");
+}
 static void cmd_jobs(const char *args) {
   (void)args;
   reap_finished_jobs();

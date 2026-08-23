@@ -69,6 +69,10 @@ int u_atoi(const char *s) {
 
 int u_getpid(void) { return (int)SC0(SYS_getpid); }
 
+unsigned u_getuid(void) { return (unsigned)SC0(SYS_getuid); }
+
+int u_setuid(unsigned uid) { return (int)SC1(SYS_setuid, uid); }
+
 void u_sleep_ms(unsigned ms) { SC1(SYS_sleep_ms, ms); }
 
 unsigned u_uptime_ms(void) { return (unsigned)SC0(SYS_uptime_ms); }

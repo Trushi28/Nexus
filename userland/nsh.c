@@ -25,6 +25,8 @@ static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
 static void cmd_run(const char *args);
 static void cmd_exec(const char *args);
+static void cmd_whoami(const char *args);
+static void cmd_drop(const char *args);
 static void cmd_jobs(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_topcmds(const char *args);
@@ -55,6 +57,9 @@ static struct nsh_command commands[] = {
      "replace THIS shell's own image with an ELF binary -- same pid, no return "
      "on success",
      0},
+    {"whoami", cmd_whoami, "", "print this shell's own clearance (uid)", 0},
+    {"drop", cmd_drop, "<uid>",
+     "narrow this shell's own clearance -- one-way, root-only", 0},
     {"jobs", cmd_jobs, "", "list background jobs spawned with 'run ... &'", 0},
     {"kill", cmd_kill, "<pid>", "signal a task to exit at its next syscall", 0},
     {"topcmds", cmd_topcmds, "", "your most-used commands this session", 0},
@@ -273,7 +278,8 @@ static void cmd_ps(const char *args) {
   u_print_left("PID", 6);
   u_print_left("NAME", 22);
   u_print_left("STATE", 10);
-  u_print("RING\n");
+  u_print_left("RING", 8);
+  u_print("UID\n");
 
   nx_task_info_t info;
   unsigned idx = 0;
@@ -286,7 +292,9 @@ static void cmd_ps(const char *args) {
     u_print_left(info.state < ARRAY_LEN(state_names) ? state_names[info.state]
                                                      : "?",
                  10);
-    u_print(info.is_user ? "user" : "kernel");
+    u_print_left(info.is_user ? "user" : "kernel", 8);
+    u_itoa((int)info.uid, buf);
+    u_print(buf);
     u_print("\n");
     idx++;
   }
@@ -439,6 +447,33 @@ static void cmd_kill(const char *args) {
     return;
   }
   u_print("kill: signalled -- exits at its next syscall\n");
+}
+
+static void cmd_whoami(const char *args) {
+  (void)args;
+  char buf[16];
+  u_itoa((int)u_getuid(), buf);
+  u_print("uid ");
+  u_print(buf);
+  u_print(u_getuid() == 0 ? " (root)\n" : " (restricted)\n");
+}
+
+static void cmd_drop(const char *args) {
+  if (*args == '\0') {
+    u_print("usage: drop <uid>\n");
+    return;
+  }
+  unsigned target = (unsigned)u_atoi(args);
+  if (u_setuid(target) < 0) {
+    u_print("drop: refused -- only uid 0 may drop, and only downward "
+            "(see 'whoami')\n");
+    return;
+  }
+  char buf[16];
+  u_itoa((int)target, buf);
+  u_print("now running as uid ");
+  u_print(buf);
+  u_print("\n");
 }
 
 static void cmd_topcmds(const char *args) {

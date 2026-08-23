@@ -67,7 +67,7 @@ static void blockdev_init_task(void *arg) {
 static void selftest_task(void *arg) {
   (void)arg;
   kprintf("[selftest] spawning /bin/hello ...\n");
-  struct task *t = process_spawn("/bin/hello", "hello");
+  struct task *t = process_spawn("/bin/hello", "hello", 0);
   if (t == NULL) {
     kprintf("[selftest] FAIL: could not spawn /bin/hello\n");
     task_exit();

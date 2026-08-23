@@ -30,6 +30,12 @@ typedef struct {
   char name[NX_TASK_NAME_MAX];
   uint32_t state;
   uint32_t is_user;
+  uint32_t uid; /* this task's clearance -- 0 is root/unrestricted.
+                   Mirrors struct task::uid (sched/sched.h) the same
+                   arm's-length way `state` mirrors enum task_state
+                   above: no shared type, kept honest by `ps`/nsh's
+                   `ps` actually rendering it, so drift would be
+                   visibly wrong rather than silently stale. */
 } nx_task_info_t;
 
 #endif /* NEXUS_TASK_INFO_H */
