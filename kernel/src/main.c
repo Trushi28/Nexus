@@ -18,6 +18,7 @@
 #include "fs/initrd.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
+#include "init/loom.h"
 #include "klib/klib.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -61,6 +62,7 @@ static void blockdev_init_task(void *arg) {
   if (have_disk) {
     graph_load_from_disk();
   }
+  loom_init();
   task_exit();
 }
 
@@ -145,6 +147,7 @@ NORETURN void kmain(void) {
   vfs_init();
   vfs_set_root(tmpfs_create_root());
   graph_init();
+  loom_init();
   const struct limine_file *initrd = boot_find_module("initrd.tar");
   if (initrd != NULL) {
     initrd_unpack(initrd->address, initrd->size);

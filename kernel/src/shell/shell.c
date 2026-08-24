@@ -12,6 +12,7 @@
 #include "drivers/pci.h"
 #include "fs/graph.h"
 #include "fs/vfs.h"
+#include "init/loom.h"
 #include "klib/klib.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -293,6 +294,7 @@ static void cmd_jobs(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_matrix(const char *args);
 static void cmd_reboot(const char *args);
+static void cmd_loom(const char *args);
 static void cmd_shutdown(const char *args);
 static void cmd_aliases(const char *args);
 static void cmd_topcmds(const char *args);
@@ -396,6 +398,8 @@ static struct shell_command commands[] = {
      NULL, 0},
     {"aliases", cmd_aliases, "", "list command shortcuts (list==ls, etc)", NULL,
      0},
+    {"loom", cmd_loom, "[reload]",
+     "list supervised strands, or 'loom reload' to pick up new ones", NULL, 0},
     {"topcmds", cmd_topcmds, "", "your most-used commands, most frecent first",
      NULL, 0},
 
@@ -1337,6 +1341,7 @@ static void cmd_matrix(const char *args) {
 
 static void cmd_reboot(const char *args) {
   (void)args;
+  loom_shutdown_all();
   if (graph_is_dirty()) {
     kprintf("graph has unsaved changes -- saving before reboot...\n");
     graph_save_to_disk(); /* logs its own outcome; a failed save still
@@ -1356,6 +1361,7 @@ static void cmd_reboot(const char *args) {
 
 static void cmd_shutdown(const char *args) {
   (void)args;
+  loom_shutdown_all();
   if (graph_is_dirty()) {
     kprintf("graph has unsaved changes -- saving before shutdown...\n");
     graph_save_to_disk();
@@ -1738,6 +1744,55 @@ static void cmd_ggc(const char *args) {
 }
 
 /* --------------------------------- dispatch ------------------------------- */
+
+static void cmd_loom(const char *args) {
+  const char *verb = skip_spaces(args);
+  if (strcmp(verb, "reload") == 0) {
+    uint32_t n = loom_reload(true);
+    kprintf("loom: reload complete, %u strand(s) launched this pass\n", n);
+    return;
+  }
+  if (*verb != '\0') {
+    kprintf("usage: loom [reload]\n");
+    return;
+  }
+
+  struct loom_strand_info info[LOOM_MAX_STRANDS];
+  uint32_t n = loom_snapshot(info, LOOM_MAX_STRANDS);
+  if (n == 0) {
+    kprintf("(no strands defined -- e.g. 'gtouch loom/hello', then 'gwrite "
+            "loom/hello \"path=/bin/hello\"', then 'loom reload')\n");
+    return;
+  }
+
+  static const char *state_names[] = {
+      "never started",
+      "running",
+      "exited",
+      "faulted",
+  };
+  kprintf("  ");
+  print_left("NAME", 16);
+  print_left("PID", 8);
+  print_left("STATE", 15);
+  print_left("RESPAWN", 9);
+  kprintf("PATH\n");
+  print_divider(60);
+  for (uint32_t i = 0; i < n; i++) {
+    char pidbuf[16];
+    if (info[i].pid != 0) {
+      ksnprintf(pidbuf, sizeof(pidbuf), "%lu", info[i].pid);
+    } else {
+      strcpy(pidbuf, "-");
+    }
+    kprintf("  ");
+    print_left(info[i].name, 16);
+    print_left(pidbuf, 8);
+    print_left(state_names[info[i].state], 15);
+    print_left(info[i].respawn_always ? "always" : "once", 9);
+    kprintf("%s\n", info[i].path);
+  }
+}
 
 static void dispatch(char *line) {
   const char *start = skip_spaces(line);
