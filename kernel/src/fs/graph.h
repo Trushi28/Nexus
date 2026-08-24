@@ -57,6 +57,7 @@ struct gnode {
                                to treat a held-open node as a GC root
                                too, the same way an sstring anchor is
                                one. */
+  uint32_t owner_uid;
 
   struct vnode vfs_node; /* embedded classic-VFS adapter for this node
                              (see fs/graphfs_vfs.c) -- re-populated

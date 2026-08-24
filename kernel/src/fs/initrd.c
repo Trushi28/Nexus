@@ -127,14 +127,14 @@ uint32_t initrd_unpack(const void *data, size_t size) {
               path, fsize, size - off);
       break;
     } else if (h->typeflag == TAR_TYPE_DIR) {
-      if (vfs_lookup_or_create(path, VNODE_DIR) == NULL) {
+      if (vfs_lookup_or_create(path, VNODE_DIR, 0) == NULL) {
         kprintf("[initrd] failed to create directory '%s' (out of "
                 "memory?) -- anything nested under it will fail too\n",
                 path);
       }
     } else if (h->typeflag == TAR_TYPE_FILE || h->typeflag == TAR_TYPE_AFILE) {
       bool pre_existing = vfs_lookup_path(path) != NULL;
-      struct vnode *n = vfs_lookup_or_create(path, VNODE_FILE);
+      struct vnode *n = vfs_lookup_or_create(path, VNODE_FILE, 0);
       if (n == NULL) {
         kprintf("[initrd] failed to create '%s' (out of memory?) -- "
                 "skipping\n",

@@ -218,7 +218,7 @@ static void sys_open_impl(struct interrupt_frame *f) {
   }
 
   struct vfs_file *file;
-  if (!vfs_open(path, flags, &file)) {
+  if (!vfs_open_as(path, flags, t->uid, &file)) {
     f->rax = (uint64_t)-1;
     return;
   }

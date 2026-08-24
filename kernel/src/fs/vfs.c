@@ -166,10 +166,12 @@ static struct vnode *find_mount(char comps[][64], int depth, int *start_index) {
 /* Splits `path` into up to VFS_MAX_DEPTH '/'-separated components and
  * walks the vnode tree from the root, optionally creating whatever's
  * missing along the way. Backs both vfs_lookup_path() (create_missing
- * = false) and vfs_lookup_or_create(). An empty path (or just "/")
+ * = false, `create_uid` unused) and vfs_lookup_or_create() (every
+ * freshly-created node is owned by `create_uid` -- see that
+ * function's own comment in vfs.h). An empty path (or just "/")
  * returns the root itself, having walked zero components. */
 static struct vnode *walk(const char *path, bool create_missing,
-                          enum vnode_type leaf_type) {
+                          enum vnode_type leaf_type, uint32_t create_uid) {
   if (root_node == NULL) {
     return NULL;
   }
@@ -249,9 +251,10 @@ static struct vnode *walk(const char *path, bool create_missing,
          * the primary root -- see vfs_set_root_fallback()'s comment
          * in vfs.h for why (and main.c's boot sequence for why this
          * is registered only after the initrd is already unpacked). */
-        child = root_fallback->ops->create(root_fallback, comps[i], want);
+        child = root_fallback->ops->create(root_fallback, comps[i], want,
+                                           create_uid);
       } else if (cur->ops->create != NULL) {
-        child = cur->ops->create(cur, comps[i], want);
+        child = cur->ops->create(cur, comps[i], want, create_uid);
       }
       if (child == NULL) {
         return NULL;
@@ -263,22 +266,28 @@ static struct vnode *walk(const char *path, bool create_missing,
 }
 
 struct vnode *vfs_lookup_path(const char *path) {
-  return walk(path, false, VNODE_FILE);
+  return walk(path, false, VNODE_FILE, 0); /* create_uid unused --
+                                               create_missing is false */
 }
 
-struct vnode *vfs_lookup_or_create(const char *path, enum vnode_type type) {
-  return walk(path, true, type);
+struct vnode *vfs_lookup_or_create(const char *path, enum vnode_type type,
+                                   uint32_t uid) {
+  return walk(path, true, type, uid);
 }
 
-bool vfs_open(const char *path, int flags, struct vfs_file **out) {
+bool vfs_open_as(const char *path, int flags, uint32_t uid,
+                 struct vfs_file **out) {
   bool create = (flags & O_CREAT) != 0;
+  bool wants_write =
+      ((flags & O_ACCMODE) != O_RDONLY) || (flags & O_TRUNC) != 0;
 
   struct vnode *n = vfs_lookup_path(path);
+  bool pre_existing = (n != NULL);
   if (n == NULL) {
     if (!create) {
       return false;
     }
-    n = vfs_lookup_or_create(path, VNODE_FILE);
+    n = vfs_lookup_or_create(path, VNODE_FILE, uid);
     if (n == NULL) {
       return false;
     }
@@ -286,6 +295,14 @@ bool vfs_open(const char *path, int flags, struct vfs_file **out) {
   if (n->type != VNODE_FILE) {
     return false;
   }
+  if (wants_write && pre_existing && uid != 0 && n->owner_uid != uid) {
+    /* Refused outright, not silently degraded to read-only -- see
+     * struct vnode::owner_uid's comment in vfs.h. Everything else in
+     * this function is byte-for-byte what vfs_open() always did; this
+     * is the entire ownership boundary. */
+    return false;
+  }
+
   struct vfs_file *f = slab_alloc(&vfs_file_cache);
   if (f == NULL) {
     return false;
@@ -298,6 +315,10 @@ bool vfs_open(const char *path, int flags, struct vfs_file **out) {
   }
   *out = f;
   return true;
+}
+
+bool vfs_open(const char *path, int flags, struct vfs_file **out) {
+  return vfs_open_as(path, flags, 0, out);
 }
 
 void vfs_close(struct vfs_file *f) {

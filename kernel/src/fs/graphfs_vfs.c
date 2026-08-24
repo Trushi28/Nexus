@@ -38,7 +38,10 @@
  * same trick tmpfs_node uses, for the same reason: stable identity,
  * and freeing the gnode automatically reclaims the embedded vnode's
  * memory too, no separate free path to maintain. graphfs_wrap()
- * re-populates it fresh on every access, so it's always current.
+ * re-populates it fresh on every access, so it's always current --
+ * that includes owner_uid now (mirrored from the gnode's own
+ * persistent field, same "never mutates after creation, safe to read
+ * unprotected" reasoning `label` already relies on).
  *
  * Reference lifetime: graphfs_node_open()/graphfs_node_close() (the
  * .open/.close vnode_ops hooks, called once per vfs_open()/
@@ -61,7 +64,8 @@ static const struct vnode_ops graphfs_root_ops;
  * n->edge_count directly, since those are graph_lock-protected fields
  * belonging to fs/graph.c, not this adapter) and returns it. `n->label`
  * is read unprotected: graph.c never mutates a label after node
- * creation, so there's no torn-read to guard against. */
+ * creation, so there's no torn-read to guard against. `n->owner_uid`
+ * is the same story. */
 static struct vnode *graphfs_wrap(struct gnode *n) {
   uint64_t size;
   uint32_t edge_count;
@@ -73,11 +77,12 @@ static struct vnode *graphfs_wrap(struct gnode *n) {
   n->vfs_node.name[sizeof(n->vfs_node.name) - 1] = '\0';
   n->vfs_node.size = size;
   n->vfs_node.fs_data = n;
+  n->vfs_node.owner_uid = n->owner_uid;
   return &n->vfs_node;
 }
 
-static size_t graphfs_node_read(struct vnode *node, uint64_t offset,
-                                void *buf, size_t len) {
+static size_t graphfs_node_read(struct vnode *node, uint64_t offset, void *buf,
+                                size_t len) {
   return graph_read((struct gnode *)node->fs_data, offset, buf, len);
 }
 
@@ -108,18 +113,22 @@ static struct vnode *graphfs_node_lookup(struct vnode *dir, const char *name) {
 }
 
 static struct vnode *graphfs_node_create(struct vnode *dir, const char *name,
-                                         enum vnode_type type) {
+                                         enum vnode_type type,
+                                         uint32_t owner_uid) {
   struct gnode *parent = (struct gnode *)dir->fs_data;
 
   struct gnode *existing = graph_edge_lookup(parent, name);
   struct vnode *v;
   if (existing != NULL) {
+    /* Pre-existing node keeps its original owner -- `owner_uid` here
+     * only ever applies to a FRESH node, in the branch below. */
     v = graphfs_wrap(existing);
   } else {
     struct gnode *n = graph_node_create(name);
     if (n == NULL) {
       return NULL;
     }
+    n->owner_uid = owner_uid;
     graph_link(parent, name, n);
     v = graphfs_wrap(n);
   }
@@ -191,7 +200,8 @@ static struct vnode *graphfs_root_lookup(struct vnode *dir, const char *name) {
 }
 
 static struct vnode *graphfs_root_create(struct vnode *dir, const char *name,
-                                         enum vnode_type type) {
+                                         enum vnode_type type,
+                                         uint32_t owner_uid) {
   (void)dir;
 
   struct gnode *existing = sstring_get(name);
@@ -203,6 +213,7 @@ static struct vnode *graphfs_root_create(struct vnode *dir, const char *name,
     if (n == NULL) {
       return NULL;
     }
+    n->owner_uid = owner_uid;
     if (!sstring_set(name, n)) {
       /* sstring table full -- same situation graph_touch() documents:
        * the node still gets created and returned so THIS call
@@ -235,9 +246,14 @@ static const struct vnode_ops graphfs_root_ops = {
 struct vnode *graphfs_vfs_root(void) {
   graphfs_root_vnode.type = VNODE_DIR;
   graphfs_root_vnode.ops = &graphfs_root_ops;
-  strncpy(graphfs_root_vnode.name, "graph", sizeof(graphfs_root_vnode.name) - 1);
+  strncpy(graphfs_root_vnode.name, "graph",
+          sizeof(graphfs_root_vnode.name) - 1);
   graphfs_root_vnode.name[sizeof(graphfs_root_vnode.name) - 1] = '\0';
   graphfs_root_vnode.size = 0;
   graphfs_root_vnode.fs_data = NULL;
+  graphfs_root_vnode.owner_uid = 0; /* never opened as a file -- see the
+                                        vnode_ops table above -- but set
+                                        explicitly for the same reason
+                                        every other field here is */
   return &graphfs_root_vnode;
 }
