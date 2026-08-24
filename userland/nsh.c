@@ -533,6 +533,12 @@ static void dispatch(char *line) {
     rest = (char *)skip_spaces(rest);
   }
 
+  size_t rest_len = u_strlen(rest);
+  while (rest_len > 0 && (uint8_t)rest[rest_len - 1] <= ' ') {
+    rest_len--;
+  }
+  rest[rest_len] = '\0';
+
   char scratch[16];
   const char *verb = normalize_verb(start, scratch, sizeof(scratch));
 

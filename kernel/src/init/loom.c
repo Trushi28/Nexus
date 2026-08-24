@@ -58,50 +58,70 @@ struct loom_descriptor {
   bool respawn_always;
 };
 
-/* Hand-rolled key=value line parser -- no quoting, no escaping, no
- * nesting. Matches this kernel's general parsing philosophy (see
- * klib/printf.c's own header comment on what it deliberately doesn't
- * implement): this is boot/service config, not a hostile input
- * surface worth a real grammar. */
+/* Hand-rolled key=value tokenizer -- no quoting, no escaping, no
+ * nesting. Splits on ANY run of whitespace (space, tab, '\n', '\r'),
+ * not just newlines: the kernel shell's line editor has no way to
+ * type a literal embedded newline into a single command (Enter always
+ * submits the line), and gwrite's own argument parsing doesn't strip
+ * quotes either (see cmd_gwrite() in shell/shell.c), so a descriptor
+ * MUST be authorable on one physical line for anyone to actually type
+ * it in. Concretely:
+ *
+ *   gwrite loom/hello path=/bin/hello uid=0 respawn=once
+ *
+ * Do NOT wrap the value in quotes -- there's nothing here to strip
+ * them, so a literal `"` just becomes part of whichever token it's
+ * attached to and silently fails to match any known key. */
 static void parse_descriptor(const char *text, struct loom_descriptor *out) {
   memset(out, 0, sizeof(*out));
 
-  const char *line = text;
-  while (*line != '\0') {
-    const char *nl = strchr(line, '\n');
-    size_t linelen = (nl != NULL) ? (size_t)(nl - line) : strlen(line);
+  const char *p = text;
+  while (*p != '\0') {
+    while (*p != '\0' && (uint8_t)*p <= ' ') {
+      p++; /* skip whitespace between tokens */
+    }
+    if (*p == '\0') {
+      break;
+    }
+    const char *tok_start = p;
+    while (*p != '\0' && (uint8_t)*p > ' ') {
+      p++;
+    }
+    size_t toklen = (size_t)(p - tok_start);
 
     const char *eq = NULL;
-    for (size_t i = 0; i < linelen; i++) {
-      if (line[i] == '=') {
-        eq = &line[i];
+    for (size_t i = 0; i < toklen; i++) {
+      if (tok_start[i] == '=') {
+        eq = &tok_start[i];
         break;
       }
     }
-    if (eq != NULL) {
-      size_t keylen = (size_t)(eq - line);
-      const char *val = eq + 1;
-      size_t vallen = linelen - keylen - 1;
-
-      if (keylen == 4 && strncmp(line, "path", 4) == 0) {
-        size_t n = MIN(vallen, sizeof(out->path) - 1);
-        memcpy(out->path, val, n);
-        out->path[n] = '\0';
-      } else if (keylen == 3 && strncmp(line, "uid", 3) == 0) {
-        uint32_t v = 0;
-        for (size_t i = 0; i < vallen; i++) {
-          if (val[i] < '0' || val[i] > '9') {
-            break;
-          }
-          v = v * 10 + (uint32_t)(val[i] - '0');
-        }
-        out->uid = v;
-      } else if (keylen == 7 && strncmp(line, "respawn", 7) == 0) {
-        out->respawn_always = (vallen == 6 && strncmp(val, "always", 6) == 0);
-      }
+    if (eq == NULL) {
+      continue; /* not a key=value token -- ignore rather than error,
+                   same tolerant-of-stray-tokens posture as the rest
+                   of this parser */
     }
 
-    line = (nl != NULL) ? nl + 1 : line + linelen;
+    size_t keylen = (size_t)(eq - tok_start);
+    const char *val = eq + 1;
+    size_t vallen = toklen - keylen - 1;
+
+    if (keylen == 4 && strncmp(tok_start, "path", 4) == 0) {
+      size_t n = MIN(vallen, sizeof(out->path) - 1);
+      memcpy(out->path, val, n);
+      out->path[n] = '\0';
+    } else if (keylen == 3 && strncmp(tok_start, "uid", 3) == 0) {
+      uint32_t v = 0;
+      for (size_t i = 0; i < vallen; i++) {
+        if (val[i] < '0' || val[i] > '9') {
+          break;
+        }
+        v = v * 10 + (uint32_t)(val[i] - '0');
+      }
+      out->uid = v;
+    } else if (keylen == 7 && strncmp(tok_start, "respawn", 7) == 0) {
+      out->respawn_always = (vallen == 6 && strncmp(val, "always", 6) == 0);
+    }
   }
 }
 

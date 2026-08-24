@@ -3,10 +3,11 @@
 
 #include "klib/klib.h"
 
-/* kprintf writes to both the serial port and the framebuffer console (if
- * one exists). This is the kernel's one and only logging/print facility;
- * everything from boot banners to the interactive shell goes through it. */
-__attribute__((format(printf, 1, 2)))
-int kprintf(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) int kprintf(const char *fmt, ...);
+
+__attribute__((format(printf, 1, 2))) int kprintf_locked(const char *fmt, ...);
+
+uint64_t kprintf_lock_acquire(void);
+void kprintf_lock_release(uint64_t flags);
 
 #endif /* NEXUS_LOG_H */

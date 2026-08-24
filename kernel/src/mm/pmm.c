@@ -49,6 +49,9 @@ void pmm_init(void) {
 
   for (uint64_t i = 0; i < mm->entry_count; i++) {
     struct limine_memmap_entry *e = mm->entries[i];
+    if (e->type != LIMINE_MEMMAP_USABLE) {
+      continue;
+    }
     uint64_t end = e->base + e->length;
     if (end > highest) {
       highest = end;

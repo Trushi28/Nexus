@@ -111,12 +111,14 @@ static void resolve_path(const char *in, char *out, size_t out_max) {
 /* ------------------------------- line editing --------------------------- */
 
 static void print_prompt(void) {
+  uint64_t flags = kprintf_lock_acquire();
   console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
-  kprintf("nexus");
+  kprintf_locked("nexus");
   console_set_colors(NX_COLOR_DIM, NX_COLOR_BG);
-  kprintf(":%s", cwd);
+  kprintf_locked(":%s", cwd);
   console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
-  kprintf("> ");
+  kprintf_locked("> ");
+  kprintf_lock_release(flags);
 }
 
 static void echo_backspace(void) {
@@ -1809,6 +1811,12 @@ static void dispatch(char *line) {
     rest++;
     rest = (char *)skip_spaces(rest);
   }
+
+  size_t rest_len = strlen(rest);
+  while (rest_len > 0 && (uint8_t)rest[rest_len - 1] <= ' ') {
+    rest_len--;
+  }
+  rest[rest_len] = '\0';
 
   char scratch[CMD_NAME_MAX];
   const char *verb = normalize_verb(start, scratch, sizeof(scratch));

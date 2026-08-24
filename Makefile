@@ -26,7 +26,7 @@
 # Pin a known-good Limine release. Bump this if you want a newer bootloader.
 LIMINE_VERSION := v12.5.2
 
-QEMUFLAGS := -m 2G -smp 4 -cpu qemu64,+x2apic 
+QEMUFLAGS := -m 2G -smp 4 -cpu qemu64,+x2apic  
 
 override IMAGE_NAME := nexus
 
