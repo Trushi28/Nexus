@@ -50,7 +50,7 @@ LIMINE_DIR := $(BUILD_DIR)/limine-binary
 OVMF_DIR := $(BUILD_DIR)/edk2-ovmf-bins
 ISO_ROOT := $(BUILD_DIR)/iso_root
 INITRD_ROOT := $(BUILD_DIR)/initrd_root
-TEST_DISK_IMG := $(BUILD_DIR)/test_disk.img
+TEST_DISK_IMG := $(BUILD_DIR)/uefi.img
 
 .PHONY: all
 all: $(ISO_IMAGE)
