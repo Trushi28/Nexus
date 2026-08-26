@@ -10,13 +10,6 @@ void vfs_set_root(struct vnode *root) { root_node = root; }
 
 struct vnode *vfs_root(void) { return root_node; }
 
-/* See vfs_set_root_fallback()'s comment in vfs.h -- NULL (the default)
- * means no fallback is consulted, and every existing lookup/create
- * behaves exactly as before this existed. */
-static struct vnode *root_fallback;
-
-void vfs_set_root_fallback(struct vnode *fallback) { root_fallback = fallback; }
-
 /* ------------------------------ mount table ------------------------------
  * Deliberately tiny and linear (VFS_MAX_MOUNTS entries, scanned start
  * to finish on every lookup) -- this kernel mounts a small, fixed
@@ -207,53 +200,28 @@ static struct vnode *walk(const char *path, bool create_missing,
 
   for (int i = start; i < depth; i++) {
     bool is_last = (i == depth - 1);
-    bool at_primary_root = (i == 0 && cur == root_node);
 
     if (cur->ops->lookup == NULL) {
       /* Every filesystem's own .lookup (tmpfs_lookup(), graphfs_*_lookup())
        * is responsible for refusing descent into what it considers a
-       * plain file -- deliberately NOT enforced here via cur->type,
-       * since that's fixed-at-creation for tmpfs but genuinely dynamic
-       * for a graph node (gains/loses VNODE_DIR-ness as edges come and
-       * go -- see fs/graphfs_vfs.c's header comment). A blanket check
-       * here would either wrongly block attaching a new child to an
-       * existing, currently-childless graph node, or (if loosened
-       * instead) wrongly allow creating a child inside what's
-       * semantically a tmpfs file. Pushing the decision down to each
-       * filesystem's own ops is the only way to get both right. */
+       * plain file -- deliberately NOT enforced here via cur->type.
+       * tmpfs's type is fixed at creation; a graph node's is now also
+       * stable once set (see struct gnode::classic_type in graph.h),
+       * but neither filesystem's invariant belongs at this generic
+       * layer -- pushing the decision down to each filesystem's own
+       * ops is what lets a currently-childless-but-still-a-directory
+       * node correctly accept a new child here. */
       return NULL;
     }
 
     struct vnode *child = cur->ops->lookup(cur, comps[i]);
-
-    /* Root-level fallback: a name that isn't a real entry in the
-     * primary root might still be reachable through root_fallback
-     * (e.g. an sstring-anchored graph node) -- try it exactly like an
-     * ordinary lookup, generically through vnode_ops, before giving
-     * up. Only at the true top level: one component directly under
-     * "/", with no mount already selected for this walk. Anywhere
-     * deeper, whatever vnode we already resolved to owns dispatch
-     * from here on. */
-    if (child == NULL && at_primary_root && root_fallback != NULL &&
-        root_fallback->ops->lookup != NULL) {
-      child = root_fallback->ops->lookup(root_fallback, comps[i]);
-    }
 
     if (child == NULL) {
       if (!create_missing) {
         return NULL;
       }
       enum vnode_type want = is_last ? leaf_type : VNODE_DIR;
-
-      if (at_primary_root && root_fallback != NULL &&
-          root_fallback->ops->create != NULL) {
-        /* A brand-new top-level name defaults to the fallback, not
-         * the primary root -- see vfs_set_root_fallback()'s comment
-         * in vfs.h for why (and main.c's boot sequence for why this
-         * is registered only after the initrd is already unpacked). */
-        child = root_fallback->ops->create(root_fallback, comps[i], want,
-                                           create_uid);
-      } else if (cur->ops->create != NULL) {
+      if (cur->ops->create != NULL) {
         child = cur->ops->create(cur, comps[i], want, create_uid);
       }
       if (child == NULL) {
@@ -268,6 +236,68 @@ static struct vnode *walk(const char *path, bool create_missing,
 struct vnode *vfs_lookup_path(const char *path) {
   return walk(path, false, VNODE_FILE, 0); /* create_uid unused --
                                                create_missing is false */
+}
+
+/* Component buffer width matches every other path tokenizer in this
+ * codebase (walk()'s own `comps[VFS_MAX_DEPTH][64]` above, and the
+ * shell-local copies this replaces) -- plenty for anything a person
+ * types or a filesystem generates a name for. */
+#define VFS_RESOLVE_COMP_MAX 64
+
+void vfs_resolve_relative(const char *cwd, const char *in, char *out,
+                          size_t out_max) {
+  char combined[256];
+  if (in[0] == '/') {
+    strncpy(combined, in, sizeof(combined) - 1);
+    combined[sizeof(combined) - 1] = '\0';
+  } else {
+    ksnprintf(combined, sizeof(combined), "%s/%s", cwd, in);
+  }
+
+  char comps[VFS_RESOLVE_MAX_DEPTH][VFS_RESOLVE_COMP_MAX];
+  int depth = 0;
+
+  const char *p = combined;
+  while (*p == '/') {
+    p++;
+  }
+  while (*p != '\0' && depth < VFS_RESOLVE_MAX_DEPTH) {
+    size_t n = 0;
+    while (*p != '\0' && *p != '/') {
+      if (n + 1 < sizeof(comps[0])) {
+        comps[depth][n++] = *p;
+      }
+      p++;
+    }
+    comps[depth][n] = '\0';
+
+    if (strcmp(comps[depth], "..") == 0) {
+      if (depth > 0) {
+        depth--;
+      }
+    } else if (comps[depth][0] != '\0' && strcmp(comps[depth], ".") != 0) {
+      depth++;
+    }
+    while (*p == '/') {
+      p++;
+    }
+  }
+
+  if (depth == 0) {
+    strncpy(out, "/", out_max - 1);
+    out[out_max - 1] = '\0';
+    return;
+  }
+
+  size_t off = 0;
+  out[0] = '\0';
+  for (int i = 0; i < depth; i++) {
+    int n = ksnprintf(out + off, out_max - off, "/%s", comps[i]);
+    if (n < 0 || (size_t)n >= out_max - off) {
+      break;
+    }
+    off += (size_t)n;
+  }
 }
 
 struct vnode *vfs_lookup_or_create(const char *path, enum vnode_type type,
@@ -378,29 +408,6 @@ bool vfs_readdir(const char *path, uint32_t index, char *name_out,
   struct vnode *dir = vfs_lookup_path(path);
   if (dir == NULL || dir->type != VNODE_DIR) {
     return false;
-  }
-
-  if (dir == root_node && root_fallback != NULL &&
-      root_fallback->ops->readdir != NULL) {
-    /* Merge the primary root's own entries with root_fallback's --
-     * tmpfs's first (by index), then the fallback's continuing where
-     * tmpfs's left off, so e.g. an sstring-anchored "photos" shows up
-     * in `ls /` right alongside "bin". Re-counts tmpfs's entries on
-     * every call rather than caching the count, so this stays correct
-     * as files come and go between readdir() calls -- O(index) work,
-     * fine for the handful of entries either namespace holds. */
-    uint32_t tmpfs_count = 0;
-    if (dir->ops->readdir != NULL) {
-      char scratch[64];
-      while (dir->ops->readdir(dir, tmpfs_count, scratch, sizeof(scratch))) {
-        tmpfs_count++;
-      }
-    }
-    if (index < tmpfs_count) {
-      return dir->ops->readdir(dir, index, name_out, name_max);
-    }
-    return root_fallback->ops->readdir(root_fallback, index - tmpfs_count,
-                                       name_out, name_max);
   }
 
   if (dir->ops->readdir == NULL) {

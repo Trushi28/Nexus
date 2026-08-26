@@ -10,28 +10,36 @@
  * which is the entire point of the vnode_ops indirection (see
  * fs/vfs.h's header comment).
  *
- * Wired up via vfs_set_root_fallback() (see main.c), not vfs_mount():
- * an sstring anchor (`sstring photos <node>`) becomes an ordinary
- * top-level path -- "/photos", not "/graph/photos" -- the instant
- * it's set, with no dedicated mount point. graphfs_vfs_root() (the
- * bottom of this file) is exactly "every current sstring anchor,
- * listed as if they were /'s own children."
+ * Wired up as the actual VFS root via vfs_set_root() (see main.c) --
+ * GraphFS *is* "/" now, not a secondary fallback grafted alongside a
+ * tmpfs root. An sstring anchor (`sstring photos <node>`) becomes an
+ * ordinary top-level path -- "/photos" -- the instant it's set, with
+ * no dedicated mount point needed. graphfs_vfs_root() (the bottom of
+ * this file) is exactly "every current sstring anchor, listed as if
+ * they were /'s own children."
  *
  * Graph nodes don't fit the strict Unix file-XOR-directory model: a
  * single node can carry both content (data/size) and outgoing edges
- * at once. This adapter resolves that by typing a wrapped node
- * dynamically, at the moment it's handed back: VNODE_DIR if it
- * currently has at least one outgoing edge (so `ls`/further traversal
- * works), VNODE_FILE otherwise (so `cat`/open()/write work --
- * vfs_open() refuses to open a VNODE_DIR as a file). A node that's
- * both non-empty AND has edges is only reachable one way at a time
- * through this adapter; the native gcat/gls commands don't have that
- * restriction, since they never have to commit to a single
- * vnode_type. graphfs_node_create()/graphfs_root_create() override
- * this dynamic typing with whatever type walk() asked for when
- * they're creating a brand-new intermediate path component -- see
- * their own comments for why that's necessary, not just an
- * optimization.
+ * at once. This adapter resolves that with a type decided ONCE and
+ * persisted on the gnode itself (struct gnode::classic_type, set in
+ * graph.h) rather than recomputed on every access: VNODE_FILE by
+ * default, promoted to VNODE_DIR permanently the instant the node
+ * gains its first outgoing edge (graph_link()) or is explicitly
+ * created as a directory through this adapter (an intermediate path
+ * component, or an explicit mkdir-style vfs_lookup_or_create()) --
+ * see graphfs_node_create()/graphfs_root_create() below. It never
+ * flips back to VNODE_FILE, even if every edge is later gunlink'd --
+ * same "an empty directory is still a directory" rule a real
+ * filesystem follows. An EARLIER version of this adapter recomputed
+ * the type from live edge_count on every single wrap, which meant the
+ * SAME path could change shape as the graph evolved elsewhere (a node
+ * that looked like a file the first time you `cat`'d it could refuse
+ * to open at all the next, having silently become a directory) --
+ * that's gone now. The one remaining wrinkle: a node that's both
+ * non-empty AND has outgoing edges is still only reachable one way
+ * (as whichever it was typed) through this adapter; the native
+ * gcat/gls commands don't have that restriction, since they never
+ * have to commit to a single vnode_type.
  *
  * Identity: each struct gnode owns its own embedded vfs_node (see
  * graph.h) instead of this file allocating a wrapper per lookup --
@@ -68,10 +76,9 @@ static const struct vnode_ops graphfs_root_ops;
  * is the same story. */
 static struct vnode *graphfs_wrap(struct gnode *n) {
   uint64_t size;
-  uint32_t edge_count;
-  graph_node_snapshot(n, &size, &edge_count);
+  graph_node_snapshot(n, &size, NULL);
 
-  n->vfs_node.type = (edge_count > 0) ? VNODE_DIR : VNODE_FILE;
+  n->vfs_node.type = n->classic_type;
   n->vfs_node.ops = &graphfs_node_ops;
   strncpy(n->vfs_node.name, n->label, sizeof(n->vfs_node.name) - 1);
   n->vfs_node.name[sizeof(n->vfs_node.name) - 1] = '\0';
@@ -118,34 +125,40 @@ static struct vnode *graphfs_node_create(struct vnode *dir, const char *name,
   struct gnode *parent = (struct gnode *)dir->fs_data;
 
   struct gnode *existing = graph_edge_lookup(parent, name);
-  struct vnode *v;
+  struct gnode *n;
   if (existing != NULL) {
     /* Pre-existing node keeps its original owner -- `owner_uid` here
      * only ever applies to a FRESH node, in the branch below. */
-    v = graphfs_wrap(existing);
+    n = existing;
   } else {
-    struct gnode *n = graph_node_create(name);
+    n = graph_node_create(name);
     if (n == NULL) {
       return NULL;
     }
     n->owner_uid = owner_uid;
-    graph_link(parent, name, n);
-    v = graphfs_wrap(n);
+    graph_link(parent, name, n); /* also promotes `parent` to DIR, since
+                                    it just gained an edge -- see
+                                    graph_link()'s own comment */
   }
 
   if (type == VNODE_DIR) {
     /* walk() passes VNODE_DIR for every intermediate path component
-     * (see its `is_last ? leaf_type : VNODE_DIR`). Force it here
-     * rather than trusting graphfs_wrap()'s live edge_count, which is
-     * still 0 for a node whose own child is about to be linked on the
-     * very next walk() iteration, not yet -- without this, creating a
-     * brand-new multi-level path in one shot (e.g. "newdir/newfile")
-     * would break: walk() would see this node as VNODE_FILE and
-     * refuse to descend into it for "newfile". An existing node that
-     * already has edges wraps as VNODE_DIR on its own regardless. */
-    v->type = VNODE_DIR;
+     * (see its `is_last ? leaf_type : VNODE_DIR`) and for an explicit
+     * mkdir-style vfs_lookup_or_create(..., VNODE_DIR, ...). Persist
+     * it onto the gnode itself -- not just the wrapper this call is
+     * about to return -- so it stays stable on every future access,
+     * including one that finds this node with zero children so far
+     * (e.g. an empty directory, or the split second before its first
+     * child gets linked on the very next walk() iteration). See
+     * struct gnode::classic_type's comment in graph.h. Silently
+     * promoting an EXISTING node from file to directory here (rather
+     * than refusing, the way a real mkdir would against a path that's
+     * already a plain file) matches this adapter's existing stance
+     * that a gnode isn't strictly one or the other -- see this file's
+     * header comment. */
+    n->classic_type = VNODE_DIR;
   }
-  return v;
+  return graphfs_wrap(n);
 }
 
 static bool graphfs_node_readdir(struct vnode *dir, uint32_t index,
@@ -205,11 +218,11 @@ static struct vnode *graphfs_root_create(struct vnode *dir, const char *name,
   (void)dir;
 
   struct gnode *existing = sstring_get(name);
-  struct vnode *v;
+  struct gnode *n;
   if (existing != NULL) {
-    v = graphfs_wrap(existing);
+    n = existing;
   } else {
-    struct gnode *n = graph_node_create(name);
+    n = graph_node_create(name);
     if (n == NULL) {
       return NULL;
     }
@@ -219,13 +232,12 @@ static struct vnode *graphfs_root_create(struct vnode *dir, const char *name,
        * the node still gets created and returned so THIS call
        * succeeds, it just won't be reachable again by that name. */
     }
-    v = graphfs_wrap(n);
   }
 
   if (type == VNODE_DIR) {
-    v->type = VNODE_DIR; /* see graphfs_node_create()'s comment */
+    n->classic_type = VNODE_DIR; /* see graphfs_node_create()'s comment */
   }
-  return v;
+  return graphfs_wrap(n);
 }
 
 static bool graphfs_root_readdir(struct vnode *dir, uint32_t index,

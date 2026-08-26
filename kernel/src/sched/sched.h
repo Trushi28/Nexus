@@ -16,6 +16,7 @@ typedef void (*task_entry_t)(void *arg);
 
 struct vfs_file;
 #define PROC_MAX_FDS 16
+#define TASK_CWD_MAX 128
 
 struct task {
   uint64_t rsp; /* only valid while NOT the running task */
@@ -59,6 +60,19 @@ struct task {
   uint64_t brk_start; /* just past the highest loaded ELF segment */
   uint64_t brk;       /* current program break, grown by sys_brk */
   struct vfs_file *fds[PROC_MAX_FDS];
+  /* This task's own working directory -- real, per-task state now
+   * (SYS_chdir/SYS_getcwd, cpu/syscall.c), not the shell-local static
+   * the kernel shell used to keep entirely to itself. Always an
+   * absolute, normalized path (no trailing slash except for "/"
+   * itself) -- see fs/vfs.c's vfs_resolve_relative(), the one place
+   * that's allowed to write into this field via a successful chdir.
+   * Defaults to "/" at creation (task_create()/task_create_user()) --
+   * split()'s child inherits the parent's instead (cpu/syscall.c's
+   * sys_split_impl), matching how brk_start/brk/fds are inherited
+   * there; an ordinary process_spawn() never inherits one at all
+   * (same "no argv/envp, no inherited environment" boundary every
+   * other freshly-spawned process already has). */
+  char cwd[TASK_CWD_MAX];
   bool waitable;
   int exit_code;
   struct task *waiting_parent;

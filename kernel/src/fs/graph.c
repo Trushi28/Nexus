@@ -148,7 +148,7 @@ static uint32_t release_cascade_locked(struct gnode *start) {
     if (n->data != NULL) {
       kfree(n->data);
     }
-    slab_free(&gnode_cache, e);
+    slab_free(&gnode_cache, n);
     freed++;
   }
   return freed;
@@ -275,7 +275,7 @@ static uint32_t collect_cycles_locked(void) {
     if (n->data != NULL) {
       kfree(n->data);
     }
-    slab_free(&gnode_cache, e);
+    slab_free(&gnode_cache, n);
     freed++;
 
     n = next_dead;
@@ -345,6 +345,14 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
   from->edges = e;
   from->edge_count++;
   to->refcount++;
+  /* `from` just gained its first-or-later outgoing edge -- from this
+   * point on the classic-VFS adapter (fs/graphfs_vfs.c) always
+   * presents it as a directory, permanently (see struct gnode's
+   * classic_type comment). Only the 0-edges-to-1 transition needs
+   * this: the two "repoint an existing edge" paths above don't change
+   * edge_count at all, so `from` was already correctly typed by
+   * whatever call first linked an edge onto it. */
+  from->classic_type = VNODE_DIR;
   spinlock_release_irqrestore(&graph_lock, f);
   graph_mark_dirty();
 }

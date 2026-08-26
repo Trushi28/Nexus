@@ -1,6 +1,8 @@
 #include "cpu/syscall.h"
 #include "abi/syscall_nr.h"
+#include "abi/sysinfo.h"
 #include "abi/task_info.h"
+#include "apic/lapic.h"
 #include "cpu/cpu.h"
 #include "cpu/io.h"
 #include "cpu/isr.h"
@@ -9,7 +11,9 @@
 #include "debug/log.h"
 #include "debug/serial.h"
 #include "drivers/keyboard.h"
+#include "fs/graph.h"
 #include "fs/vfs.h"
+#include "init/power.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
@@ -205,6 +209,10 @@ static void sys_open_impl(struct interrupt_frame *f) {
   }
 
   struct task *t = this_cpu()->current_task;
+
+  char resolved[256];
+  vfs_resolve_relative(t->cwd, path, resolved, sizeof(resolved));
+
   int slot = -1;
   for (int i = 0; i < PROC_MAX_FDS; i++) {
     if (t->fds[i] == NULL) {
@@ -218,7 +226,7 @@ static void sys_open_impl(struct interrupt_frame *f) {
   }
 
   struct vfs_file *file;
-  if (!vfs_open_as(path, flags, t->uid, &file)) {
+  if (!vfs_open_as(resolved, flags, t->uid, &file)) {
     f->rax = (uint64_t)-1;
     return;
   }
@@ -275,6 +283,141 @@ static void sys_setuid_impl(struct interrupt_frame *f) {
   }
   caller->uid = requested;
   f->rax = 0;
+}
+
+/* Resolves `path` against the caller's OWN cwd (vfs_resolve_relative())
+ * and, if it names a real directory, commits the resolved (absolute,
+ * normalized) result as the caller's new cwd -- same verify-before-
+ * commit shape as shell/shell.c's own cmd_cd(), which this mirrors
+ * exactly, just per-task instead of per-shell-instance now. */
+static void sys_chdir_impl(struct interrupt_frame *f) {
+  uint64_t path_va = f->rdi;
+
+  char path[256];
+  if (!user_range_ok(path_va, 1) ||
+      !copy_string_from_user(path, (const void *)path_va, sizeof(path))) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct task *t = this_cpu()->current_task;
+  char resolved[256];
+  vfs_resolve_relative(t->cwd, path, resolved, sizeof(resolved));
+
+  struct vnode *n = vfs_lookup_path(resolved);
+  if (n == NULL || n->type != VNODE_DIR) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  strncpy(t->cwd, resolved, sizeof(t->cwd) - 1);
+  t->cwd[sizeof(t->cwd) - 1] = '\0';
+  f->rax = 0;
+}
+
+/* Copies the caller's own cwd out to `buf` (capacity `len`). Refuses
+ * outright rather than silently truncating if `buf` is too small --
+ * unlike SYS_readdir's name_out (where a truncated directory ENTRY
+ * name is merely cosmetic), a truncated PATH handed back to a caller
+ * that's about to cd into or display it is exactly the kind of subtle
+ * wrong-directory bug worth failing loudly on instead. */
+static void sys_getcwd_impl(struct interrupt_frame *f) {
+  uint64_t buf_va = f->rdi;
+  uint64_t len = f->rsi;
+
+  if (!user_range_ok(buf_va, len)) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  struct task *t = this_cpu()->current_task;
+  size_t n = strlen(t->cwd);
+  if (len == 0 || n >= len) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  if (copy_to_user((void *)buf_va, t->cwd, n + 1) != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  f->rax = 0;
+}
+
+/* SYS_reboot/SYS_shutdown -- root-only, same reasoning as SYS_setuid:
+ * this affects the WHOLE machine, not just the calling process, so a
+ * restricted task (see nsh's `drop`) can't trigger it just by knowing
+ * the syscall exists. power_reboot()/power_shutdown() (init/power.c)
+ * never return on success -- the exact same functions shell/shell.c's
+ * `reboot`/`shutdown` commands call, so a ring-3 `reboot`/`shutdown`
+ * (nsh) and the kernel shell's own do byte-for-byte the same thing. */
+static void sys_reboot_impl(struct interrupt_frame *f) {
+  struct task *caller = this_cpu()->current_task;
+  if (caller->uid != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  power_reboot(); /* never returns */
+}
+
+static void sys_shutdown_impl(struct interrupt_frame *f) {
+  struct task *caller = this_cpu()->current_task;
+  if (caller->uid != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  power_shutdown(); /* never returns */
+}
+
+/* A flat, read-only snapshot of a handful of system facts (abi/
+ * sysinfo.h's nx_sysinfo_t) -- everything nsh's `meminfo`/`cpuinfo`
+ * need, in one syscall instead of several, and available to any uid
+ * (purely informational, nothing here is sensitive). */
+static void sys_sysinfo_impl(struct interrupt_frame *f) {
+  uint64_t out_va = f->rdi;
+  if (!user_range_ok(out_va, sizeof(nx_sysinfo_t))) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+
+  nx_sysinfo_t info;
+  info.cpu_count = g_cpu_count;
+  info.x2apic = lapic_using_x2apic() ? 1 : 0;
+  info.mem_total_bytes = pmm_total_bytes();
+  info.mem_used_bytes = pmm_used_bytes();
+  info.heap_used_bytes = heap_used_bytes();
+  info.heap_capacity_bytes = heap_capacity_bytes();
+  info.uptime_ms = timer_uptime_ms();
+
+  if (copy_to_user((void *)out_va, &info, sizeof(info)) != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  f->rax = 0;
+}
+
+/* SYS_gsync/SYS_gload -- root-only, same reasoning as SYS_reboot/
+ * SYS_shutdown: the graph is shared, system-wide, persisted state,
+ * not something scoped to the calling process, so triggering a save
+ * or a reload of it is gated the same way. Straight passthroughs to
+ * fs/graph.c's own functions, which already log their own outcome --
+ * see cmd_gsync()/cmd_gload() in shell/shell.c for the identical
+ * kernel-shell equivalent. */
+static void sys_gsync_impl(struct interrupt_frame *f) {
+  struct task *caller = this_cpu()->current_task;
+  if (caller->uid != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  f->rax = graph_save_to_disk() ? 0 : (uint64_t)-1;
+}
+
+static void sys_gload_impl(struct interrupt_frame *f) {
+  struct task *caller = this_cpu()->current_task;
+  if (caller->uid != 0) {
+    f->rax = (uint64_t)-1;
+    return;
+  }
+  f->rax = graph_load_from_disk() ? 0 : (uint64_t)-1;
 }
 
 static void sys_sleep_ms_impl(struct interrupt_frame *f) {
@@ -344,8 +487,12 @@ static void sys_readdir_impl(struct interrupt_frame *f) {
     return;
   }
 
+  char resolved[256];
+  vfs_resolve_relative(this_cpu()->current_task->cwd, path, resolved,
+                       sizeof(resolved));
+
   char name[64];
-  if (!vfs_readdir(path, index, name, sizeof(name))) {
+  if (!vfs_readdir(resolved, index, name, sizeof(name))) {
     f->rax = (uint64_t)-1;
     return;
   }
@@ -381,7 +528,11 @@ static void sys_spawn_impl(struct interrupt_frame *f) {
    * process_spawn() directly with an explicit uid instead of going
    * through this syscall at all (see shell/shell.c's cmd_runas()). */
   struct task *caller = this_cpu()->current_task;
-  struct task *t = process_spawn(path, path, caller->uid);
+
+  char resolved[256];
+  vfs_resolve_relative(caller->cwd, path, resolved, sizeof(resolved));
+
+  struct task *t = process_spawn(resolved, resolved, caller->uid);
   f->rax = (t != NULL) ? t->id : (uint64_t)-1;
 }
 
@@ -395,8 +546,12 @@ static void sys_exec_impl(struct interrupt_frame *f) {
     return;
   }
 
+  struct task *t = this_cpu()->current_task;
+  char resolved[256];
+  vfs_resolve_relative(t->cwd, path, resolved, sizeof(resolved));
+
   struct vfs_file *file;
-  if (!vfs_open(path, O_RDONLY, &file)) {
+  if (!vfs_open(resolved, O_RDONLY, &file)) {
     f->rax = (uint64_t)-1;
     return;
   }
@@ -443,10 +598,9 @@ static void sys_exec_impl(struct interrupt_frame *f) {
     vmm_map_page_in(new_pml4, va, phys, VMM_WRITABLE | VMM_USER | VMM_NX);
   }
 
-  /* Note: exec() does NOT touch uid -- the credential belongs to the
-   * process, not the image, exactly like a real exec() with no setuid
-   * bit involved. */
-  struct task *t = this_cpu()->current_task;
+  /* Note: exec() does NOT touch uid, and does NOT touch cwd either --
+   * both belong to the process, not the image, exactly like a real
+   * exec() with no setuid bit and no chdir side effect involved. */
   uint64_t old_pml4 = t->cr3_phys;
 
   write_cr3(new_pml4);
@@ -454,7 +608,7 @@ static void sys_exec_impl(struct interrupt_frame *f) {
   t->brk_start = ALIGN_UP(elf.highest_vaddr, PAGE_SIZE);
   t->brk = t->brk_start;
 
-  strncpy(t->name, path, sizeof(t->name) - 1);
+  strncpy(t->name, resolved, sizeof(t->name) - 1);
   t->name[sizeof(t->name) - 1] = '\0';
 
   vmm_free_user_space(old_pml4);
@@ -501,6 +655,8 @@ static void sys_split_impl(struct interrupt_frame *f) {
   child->brk_start = parent->brk_start;
   child->brk = parent->brk;
   child->parent = parent;
+  strncpy(child->cwd, parent->cwd, sizeof(child->cwd) - 1);
+  child->cwd[sizeof(child->cwd) - 1] = '\0';
   ksnprintf(child->name, sizeof(child->name), "%s~%lu", parent->name,
             child->id);
 
@@ -702,6 +858,27 @@ static void syscall_dispatch(struct interrupt_frame *f) {
     break;
   case SYS_setuid:
     sys_setuid_impl(f);
+    break;
+  case SYS_chdir:
+    sys_chdir_impl(f);
+    break;
+  case SYS_getcwd:
+    sys_getcwd_impl(f);
+    break;
+  case SYS_reboot:
+    sys_reboot_impl(f);
+    break;
+  case SYS_shutdown:
+    sys_shutdown_impl(f);
+    break;
+  case SYS_sysinfo:
+    sys_sysinfo_impl(f);
+    break;
+  case SYS_gsync:
+    sys_gsync_impl(f);
+    break;
+  case SYS_gload:
+    sys_gload_impl(f);
     break;
   default:
     kprintf("[syscall] pid %lu made unknown syscall %lu\n",

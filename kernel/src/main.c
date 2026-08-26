@@ -16,7 +16,6 @@
 #include "fs/graph.h"
 #include "fs/graphfs_vfs.h"
 #include "fs/initrd.h"
-#include "fs/tmpfs.h"
 #include "fs/vfs.h"
 #include "init/loom.h"
 #include "klib/klib.h"
@@ -53,19 +52,6 @@ static void graph_autosave_task(void *arg) {
     }
   }
 }
-static void blockdev_init_task(void *arg) {
-  (void)arg;
-  bool have_disk = nvme_init();
-  if (!have_disk) {
-    have_disk = virtio_blk_init();
-  }
-  if (have_disk) {
-    graph_load_from_disk();
-  }
-  loom_init();
-  task_exit();
-}
-
 static void selftest_task(void *arg) {
   (void)arg;
   kprintf("[selftest] spawning /bin/hello ...\n");
@@ -77,6 +63,71 @@ static void selftest_task(void *arg) {
   int code = process_wait(t);
   kprintf("[selftest] /bin/hello exited with code %d\n", code);
   kprintf("[selftest] %s\n", code == 0 ? "PASS" : "FAIL");
+  task_exit();
+}
+
+static void blockdev_init_task(void *arg) {
+  (void)arg;
+
+  /* NVMe/virtio-blk bring-up blocks on a real completion interrupt
+   * (submit_and_wait() -> task_block() -> schedule()), so it can only
+   * run once the scheduler exists -- this task is why boot doesn't
+   * try to do any of this synchronously in kmain(). That in turn is
+   * why GraphFS -- now the actual "/" (see vfs_set_root() in kmain())
+   * -- can only be guaranteed populated from HERE onward, not any
+   * earlier: this task owns disk bring-up, restoring last session's
+   * graph, seeding/refreshing '/bin' from this build's initrd, and
+   * only THEN handing off to an interactive shell and (if requested)
+   * the self-test -- every one of which needs '/bin' to actually
+   * exist first. */
+  bool have_disk = nvme_init();
+  if (!have_disk) {
+    have_disk = virtio_blk_init();
+  }
+  if (have_disk) {
+    graph_load_from_disk(); /* logs its own outcome; a fresh/empty disk
+                                (or none at all) just means we start
+                                from an empty graph -- nothing fatal */
+  }
+
+  const struct limine_file *initrd = boot_find_module("initrd.tar");
+  if (initrd != NULL) {
+    /* Always re-unpacks, even over a graph that gload'd a previous
+     * session: '/bin' should always match the binaries THIS kernel
+     * build actually shipped, while everything else the graph
+     * restored (the user's own gtouch/gmk/sstring content) is left
+     * completely untouched -- initrd_unpack() only ever writes the
+     * specific paths it's packing, and per-file logs "overwrote a
+     * pre-existing entry" when that's what happened. This is what
+     * makes '/bin' part of the one real, persistent namespace instead
+     * of a second, disconnected filesystem that only ever existed for
+     * one boot -- gnodeinfo/gls/ggc all see it exactly like anything
+     * else in the graph now. */
+    initrd_unpack(initrd->address, initrd->size);
+  } else {
+    kprintf("[boot] no initrd module found -- '/bin' will be empty\n");
+  }
+
+  loom_boot(); /* strand scan + supervisor -- now that the graph
+                   actually has content to scan, unlike at the
+                   loom_init()-only point earlier in kmain() */
+
+  if (strstr(g_boot.cmdline, "kshell") != NULL) {
+    task_create("shell", shell_task, NULL);
+  } else {
+    struct task *nsh = process_spawn("/bin/nsh", "nsh", 0);
+    if (nsh == NULL) {
+      kprintf("[boot] couldn't spawn /bin/nsh -- falling back to the "
+              "ring-0 kernel shell (see 'kshell' on the cmdline to "
+              "always get this on purpose)\n");
+      task_create("shell", shell_task, NULL);
+    }
+  }
+
+  if (strstr(g_boot.cmdline, "selftest") != NULL) {
+    task_create("selftest", selftest_task, NULL);
+  }
+
   task_exit();
 }
 
@@ -145,17 +196,19 @@ NORETURN void kmain(void) {
 
   heap_init();
   vfs_init();
-  vfs_set_root(tmpfs_create_root());
   graph_init();
-  loom_init();
-  const struct limine_file *initrd = boot_find_module("initrd.tar");
-  if (initrd != NULL) {
-    initrd_unpack(initrd->address, initrd->size);
-  } else {
-    kprintf("[boot] no initrd module found -- '/' will be empty\n");
-  }
 
-  vfs_set_root_fallback(graphfs_vfs_root());
+  /* GraphFS *is* "/" now -- see fs/graphfs_vfs.c's header comment.
+   * It's empty at this exact point (nothing's touched the graph yet);
+   * blockdev_init_task (below) is what actually populates it -- disk
+   * bring-up needs the scheduler running first (task_block() on a
+   * completion interrupt), so that can't happen any earlier than this
+   * line no matter what. loom_init() just zeroes Loom's in-memory
+   * strand table -- cheap, safe to do against an empty graph -- the
+   * real strand scan (loom_boot()) waits for blockdev_init_task too,
+   * for the same reason. */
+  vfs_set_root(graphfs_vfs_root());
+  loom_init();
   splash_progress(65, "filesystem");
 
   timer_calibrate();
@@ -174,12 +227,12 @@ NORETURN void kmain(void) {
 
   kprintf("[boot] core init complete, starting the scheduler\n\n");
 
-  task_create("shell", shell_task, NULL);
+  /* No "shell" task started directly here any more -- blockdev_init_task
+   * spawns the interactive shell itself (nsh by default, or the ring-0
+   * kernel shell with "kshell" on the cmdline) only once '/bin' is
+   * guaranteed to actually exist. Same reasoning covers "selftest". */
   task_create("blockdev", blockdev_init_task, NULL);
   task_create("gautosave", graph_autosave_task, NULL);
-  if (strstr(g_boot.cmdline, "selftest") != NULL) {
-    task_create("selftest", selftest_task, NULL);
-  }
   // task_create("heartbeat-a", heartbeat_task, "heartbeat-a");
   // task_create("heartbeat-b", heartbeat_task, "heartbeat-b");
 

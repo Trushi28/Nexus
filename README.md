@@ -41,9 +41,9 @@ from scratch rather than borrowed from the bootloader.
 - **SMP** — full AP bring-up via Limine's MP feature; tasks migrate freely across cores, mid-syscall included
 - **Scheduling** — preemptive round-robin, sleep/wait queues, cooperative context switching
 - **Usermode** — ring-3 processes, ELF64 loader, a real syscall ABI (`exit`, `read`, `write`, `open`, `close`, `getpid`, `sleep_ms`, `yield`, `brk`, `readdir`, `uptime_ms`)
-- **Filesystem** — small VFS + tmpfs, booted from a USTAR initrd
-- **Drivers** — serial, framebuffer console, PS/2 keyboard, PCI scanner
-- **Shell** — `meminfo`, `cpuinfo`, `ps`, `lspci`, `ls`, `cat`, `run`, `matrix`, `reboot`
+- **Filesystem** — small VFS, primary root backed by GraphFS (a graph-based filesystem, persisted to disk), `/bin` seeded from a USTAR initrd
+- **Drivers** — serial, framebuffer console, PS/2 keyboard, PCI scanner, NVMe, virtio-blk
+- **Shell** — nsh (ring-3, the default interactive shell) plus a ring-0 kernel shell (`kshell` on the cmdline) for privileged/diagnostic commands: `meminfo`, `cpuinfo`, `ps`, `lspci`, `ls`, `cat`, `run`, `matrix`, `reboot`, `loom`, native graph commands (`gsync`/`gload`/`ggc`/`gclear`/...)
 
 ## Getting started
 
@@ -90,13 +90,16 @@ Already shipped, despite older notes to the contrary: real `copy_from_user`/
 (`run <path> &`, `jobs`, `kill`) in both shells, an MSI-X-driven (not
 polled) NVMe driver, `O_RDONLY`/`O_WRONLY` enforcement on open file
 descriptors, a generic VFS mount table (`vfs_mount()`/`vfs_unmount()` --
-currently unused, since the graph filesystem uses the separate, simpler
-`vfs_set_root_fallback()` instead; ready for whenever a second real
-mountable filesystem shows up), the graph filesystem grafted
-transparently into the classic path namespace (`sstring photos <node>`
-makes `/photos` work like any other top-level path -- see
-`fs/graphfs_vfs.c`), and a `struct slab_cache` allocator (`mm/slab.c`)
-now backing `struct task` allocation instead of the general heap.
+currently unused, ready for whenever a second real mountable filesystem
+shows up), a `struct slab_cache` allocator (`mm/slab.c`) now backing
+`struct task` allocation instead of the general heap, and -- as of this
+pass -- **GraphFS as the actual primary filesystem** (not a secondary
+fallback grafted onto a tmpfs root): `/bin` now lives in the graph
+itself, persists across reboots via `gsync`/`gload` like everything
+else in it, and nsh (`/bin/nsh`) is the default interactive shell,
+with the ring-0 kernel shell reachable via `kshell` on the cmdline --
+see `docs/DESIGN.md`'s Known limitations section and Kernel command
+line section for the details.
 A second block device driver, virtio-blk (`drivers/virtio_blk.c`),
 also exists behind the same `drivers/blockdev.h` HAL as NVMe -- but
 it's compile-tested only, **not yet verified against real hardware or

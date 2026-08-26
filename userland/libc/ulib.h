@@ -1,6 +1,7 @@
 #ifndef NEXUS_ULIB_H
 #define NEXUS_ULIB_H
 
+#include "sysinfo.h"
 #include "task_info.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -92,5 +93,35 @@ bool u_find_task(int pid, nx_task_info_t *out);
  * the kernel shell's own `ps` walks. False once `index` is past the
  * last task. */
 bool u_ps(unsigned index, nx_task_info_t *out);
+
+/* Working directory -- real per-task state now (SYS_chdir/SYS_getcwd,
+ * cpu/syscall.c's struct task::cwd). u_chdir() resolves `path`
+ * relative to this task's OWN current cwd (or takes it verbatim if
+ * absolute) and, if it names a real directory, commits it. u_getcwd()
+ * copies the current cwd out to `buf`; false (not just a truncated
+ * result) if `buf` is too small -- see sys_getcwd_impl()'s own
+ * comment for why that's a hard refusal, not a silent truncation. */
+int u_chdir(const char *path);              /* -> 0, or -1 */
+bool u_getcwd(char *buf, size_t max);        /* -> true and fills buf, or false */
+
+/* Power control -- root-only (see 'whoami'/'drop'). Both never return
+ * on success; the machine is rebooting/off by the time control would
+ * otherwise come back. Only return at all -- with -1 -- on refusal. */
+int u_reboot(void);
+int u_shutdown(void);
+
+/* A flat snapshot of cpu count/x2APIC/memory/heap/uptime -- see
+ * abi/sysinfo.h's nx_sysinfo_t. Available to any uid. */
+bool u_sysinfo(nx_sysinfo_t *out);
+
+/* Save/reload the persistent graph filesystem to/from disk -- root-
+ * only, same reasoning as u_reboot()/u_shutdown() (shared, system-
+ * wide state, not scoped to the calling process). Straight
+ * passthroughs to fs/graph.c's graph_save_to_disk()/
+ * graph_load_from_disk(), which already log their own outcome to the
+ * kernel's own console/serial -- there's no separate userland-visible
+ * error detail beyond the 0/-1 result. */
+int u_gsync(void); /* -> 0, or -1 */
+int u_gload(void); /* -> 0, or -1 */
 
 #endif /* NEXUS_ULIB_H */

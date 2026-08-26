@@ -157,3 +157,19 @@ bool u_ps(unsigned index, nx_task_info_t *out) {
   long r = SC2(SYS_ps, index, out);
   return r == 0;
 }
+
+int u_chdir(const char *path) { return (int)SC1(SYS_chdir, path); }
+
+bool u_getcwd(char *buf, size_t max) {
+  return SC2(SYS_getcwd, buf, max) == 0;
+}
+
+int u_reboot(void) { return (int)SC0(SYS_reboot); }
+
+int u_shutdown(void) { return (int)SC0(SYS_shutdown); }
+
+bool u_sysinfo(nx_sysinfo_t *out) { return SC1(SYS_sysinfo, out) == 0; }
+
+int u_gsync(void) { return (int)SC0(SYS_gsync); }
+
+int u_gload(void) { return (int)SC0(SYS_gload); }

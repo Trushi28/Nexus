@@ -239,6 +239,8 @@ struct task *task_create(const char *name, task_entry_t entry, void *arg) {
   t->arg = arg;
   t->state = TASK_READY;
   t->uid = 0;
+  t->cwd[0] = '/'; /* see struct task::cwd's comment in sched.h */
+  t->cwd[1] = '\0';
   uint64_t stack_top =
       (uint64_t)phys_to_virt(stack_phys) + KERNEL_STACK_PAGES * PAGE_SIZE;
   uint64_t *sp = (uint64_t *)stack_top;
@@ -281,6 +283,11 @@ struct task *task_create_user(const char *name, uint64_t cr3_phys,
   t->is_user = true;
   t->waitable = true;
   t->uid = uid;
+  t->cwd[0] = '/'; /* see struct task::cwd's comment in sched.h --
+                       split()'s child overwrites this with the
+                       parent's own cwd right after creation, in
+                       cpu/syscall.c's sys_split_impl */
+  t->cwd[1] = '\0';
   t->cr3_phys = cr3_phys;
   t->user_entry = entry;
   t->user_stack_top = user_stack_top;

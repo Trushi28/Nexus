@@ -23,34 +23,52 @@ static void cmd_echo(const char *args);
 static void cmd_ps(const char *args);
 static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
+static void cmd_cd(const char *args);
 static void cmd_run(const char *args);
 static void cmd_exec(const char *args);
 static void cmd_whoami(const char *args);
 static void cmd_drop(const char *args);
 static void cmd_jobs(const char *args);
 static void cmd_kill(const char *args);
+static void cmd_meminfo(const char *args);
+static void cmd_cpuinfo(const char *args);
+static void cmd_reboot(const char *args);
+static void cmd_shutdown(const char *args);
+static void cmd_gsync(const char *args);
+static void cmd_gload(const char *args);
 static void cmd_topcmds(const char *args);
 static void cmd_exit(const char *args);
 
 /* Same non-POSIX naming philosophy as the kernel shell (shell.c):
- * several spellings, one canonical handler. */
+ * several spellings, one canonical handler. Several of these
+ * deliberately match shell.c's OWN synonym table 1:1 (mem/free,
+ * cpu, poweroff/halt, save/load) so a habit picked up in one shell
+ * carries straight over to the other. */
 struct nsh_synonym {
   const char *alias;
   const char *canonical;
 };
 
 static const struct nsh_synonym synonyms[] = {
-    {"list", "ls"},   {"dir", "ls"},    {"type", "cat"},  {"read", "cat"},
-    {"spawn", "run"}, {"start", "run"}, {"tasks", "ps"},  {"procs", "ps"},
-    {"who", "ps"},    {"say", "echo"},  {"quit", "exit"}, {"logout", "exit"},
+    {"list", "ls"},        {"dir", "ls"},        {"type", "cat"},
+    {"read", "cat"},       {"spawn", "run"},     {"start", "run"},
+    {"tasks", "ps"},       {"procs", "ps"},      {"who", "ps"},
+    {"say", "echo"},       {"quit", "exit"},     {"logout", "exit"},
+    {"mem", "meminfo"},    {"free", "meminfo"},  {"cpu", "cpuinfo"},
+    {"poweroff", "shutdown"}, {"halt", "shutdown"},
+    {"save", "gsync"},     {"load", "gload"},
 };
 
 static struct nsh_command commands[] = {
     {"help", cmd_help, "", "this text", 0},
     {"echo", cmd_echo, "<text>", "print text back", 0},
     {"ps", cmd_ps, "", "list every live task", 0},
-    {"ls", cmd_ls, "[path]", "list a directory (default: /)", 0},
+    {"ls", cmd_ls, "[path]", "list a directory (default: cwd)", 0},
     {"cat", cmd_cat, "<path>", "print a file's contents", 0},
+    {"cd", cmd_cd, "[path]",
+     "change this shell's working directory (default: /); supports .. "
+     "and relative paths",
+     0},
     {"run", cmd_run, "<path>",
      "spawn an ELF binary and wait for it (append & to background it)", 0},
     {"exec", cmd_exec, "<path>",
@@ -62,6 +80,18 @@ static struct nsh_command commands[] = {
      "narrow this shell's own clearance -- one-way, root-only", 0},
     {"jobs", cmd_jobs, "", "list background jobs spawned with 'run ... &'", 0},
     {"kill", cmd_kill, "<pid>", "signal a task to exit at its next syscall", 0},
+    {"meminfo", cmd_meminfo, "", "physical memory + heap usage", 0},
+    {"cpuinfo", cmd_cpuinfo, "", "list online CPUs and APIC mode", 0},
+    {"reboot", cmd_reboot, "",
+     "save if dirty, then reset the machine. Root only", 0},
+    {"shutdown", cmd_shutdown, "",
+     "save if dirty, then power off (ACPI, falling back as needed). "
+     "Root only",
+     0},
+    {"gsync", cmd_gsync, "", "save the graph filesystem to disk. Root only",
+     0},
+    {"gload", cmd_gload, "",
+     "reload the graph filesystem from disk (only if empty). Root only", 0},
     {"topcmds", cmd_topcmds, "", "your most-used commands this session", 0},
     {"exit", cmd_exit, "[code]", "leave the ring-3 shell", 0},
 };
@@ -301,7 +331,7 @@ static void cmd_ps(const char *args) {
 }
 
 static void cmd_ls(const char *args) {
-  const char *path = (*args == '\0') ? "/" : args;
+  const char *path = (*args == '\0') ? "." : args;
   char name[64];
   unsigned i = 0;
   bool any = false;
@@ -314,6 +344,19 @@ static void cmd_ls(const char *args) {
   }
   if (!any) {
     u_print("(empty, or no such directory)\n");
+  }
+}
+
+/* No local cwd tracking here at all -- SYS_chdir commits the new cwd
+ * kernel-side (struct task::cwd, cpu/syscall.c), and print_prompt()
+ * reads it back fresh via u_getcwd() on every prompt. Nothing else
+ * can ever change this task's cwd out from under it, so there's
+ * nothing to keep in sync locally -- the kernel's copy is the only
+ * copy. */
+static void cmd_cd(const char *args) {
+  const char *target = (*args == '\0') ? "/" : args;
+  if (u_chdir(target) < 0) {
+    u_print("cd: no such directory\n");
   }
 }
 
@@ -449,6 +492,90 @@ static void cmd_kill(const char *args) {
   u_print("kill: signalled -- exits at its next syscall\n");
 }
 
+/* Renders a byte count in MiB -- u_itoa() only takes a plain `int`,
+ * so anything finer-grained (KiB, exact bytes) risks overflowing it
+ * on a machine with more than ~2GiB of RAM; MiB keeps every realistic
+ * value comfortably inside int32 range. Coarser than shell.c's own
+ * fmt_bytes()/print_usage_bar() (which have ksnprintf() and a real
+ * framebuffer bar to work with), but plenty for a quick userland
+ * check. */
+static void print_mib(unsigned long bytes) {
+  char buf[16];
+  u_itoa((int)(bytes / (1024 * 1024)), buf);
+  u_print(buf);
+  u_print(" MiB");
+}
+
+static void cmd_meminfo(const char *args) {
+  (void)args;
+  nx_sysinfo_t info;
+  if (!u_sysinfo(&info)) {
+    u_print("meminfo: couldn't read system info\n");
+    return;
+  }
+  u_print("physical: ");
+  print_mib(info.mem_used_bytes);
+  u_print(" / ");
+  print_mib(info.mem_total_bytes);
+  u_print(" used\n");
+  u_print("heap:     ");
+  print_mib(info.heap_used_bytes);
+  u_print(" / ");
+  print_mib(info.heap_capacity_bytes);
+  u_print(" used\n");
+}
+
+static void cmd_cpuinfo(const char *args) {
+  (void)args;
+  nx_sysinfo_t info;
+  if (!u_sysinfo(&info)) {
+    u_print("cpuinfo: couldn't read system info\n");
+    return;
+  }
+  char buf[16];
+  u_itoa((int)info.cpu_count, buf);
+  u_print(buf);
+  u_print(" cpu(s) known, x2APIC ");
+  u_print(info.x2apic ? "enabled\n" : "not in use\n");
+}
+
+/* u_reboot()/u_shutdown() never return on success -- the print below
+ * only ever gets a chance to read as "did nothing" if the syscall
+ * itself was refused (not root; see 'whoami'/'drop'). */
+static void cmd_reboot(const char *args) {
+  (void)args;
+  u_print("rebooting...\n");
+  u_reboot();
+  u_print("reboot: refused -- root only (see 'whoami'/'drop')\n");
+}
+
+static void cmd_shutdown(const char *args) {
+  (void)args;
+  u_print("shutting down...\n");
+  u_shutdown();
+  u_print("shutdown: refused -- root only (see 'whoami'/'drop')\n");
+}
+
+static void cmd_gsync(const char *args) {
+  (void)args;
+  if (u_gsync() < 0) {
+    u_print("gsync: failed -- no block device, not root, or nothing to "
+            "save to\n");
+    return;
+  }
+  u_print("graph saved\n");
+}
+
+static void cmd_gload(const char *args) {
+  (void)args;
+  if (u_gload() < 0) {
+    u_print("gload: failed -- no saved graph, not root, or the graph "
+            "isn't empty (gload only ever loads into an empty graph)\n");
+    return;
+  }
+  u_print("graph loaded\n");
+}
+
 static void cmd_whoami(const char *args) {
   (void)args;
   char buf[16];
@@ -556,14 +683,73 @@ static void dispatch(char *line) {
   suggest_commands(start);
 }
 
+/* ------------------------------- banner / prompt --------------------------
+ * A plain-ASCII counterpart to the kernel shell's Unicode box-drawn
+ * banner (shell/shell.c's print_box_line()/print_box_border_top()) --
+ * nsh has no framebuffer/console access at all, only u_print() over a
+ * syscall, so there's no color and no box-drawing glyphs available
+ * here, just '+'/'-'/'|'. u_print_left() (ulib.h) does the same
+ * pad-to-width job shell.c's print_left() does kernel-side, so every
+ * row still lines up regardless of how long its text is. */
+#define BANNER_WIDTH 62
+
+static void banner_rule(void) {
+  u_putc('+');
+  for (int i = 0; i < BANNER_WIDTH; i++) {
+    u_putc('-');
+  }
+  u_putc('+');
+  u_putc('\n');
+}
+
+static void banner_line(const char *text) {
+  u_print("| ");
+  u_print_left(text, BANNER_WIDTH - 2);
+  u_print(" |\n");
+}
+
+static void print_banner(void) {
+  banner_rule();
+  banner_line("NEXUS -- nsh, the default ring-3 shell");
+  banner_line("type 'help' for commands, 'exit' to leave");
+  banner_line("need lspci / loom / native graph admin? boot with 'kshell'");
+  banner_rule();
+
+  nx_sysinfo_t info;
+  if (u_sysinfo(&info)) {
+    char buf[16];
+    u_itoa((int)info.cpu_count, buf);
+    u_print(buf);
+    u_print(" cpu(s) online, x2APIC ");
+    u_print(info.x2apic ? "on\n\n" : "off\n\n");
+  } else {
+    u_print("\n");
+  }
+}
+
+/* Shows this task's OWN cwd, read fresh from the kernel every time --
+ * see cmd_cd()'s comment for why there's no local copy to keep in
+ * sync. Falls back to "?" rather than silently omitting it if
+ * u_getcwd() somehow fails (it shouldn't -- LINE_MAX is comfortably
+ * larger than struct task::cwd's own TASK_CWD_MAX). */
+static void print_prompt(void) {
+  char cwd[LINE_MAX];
+  if (!u_getcwd(cwd, sizeof(cwd))) {
+    u_strncpy(cwd, "?", sizeof(cwd) - 1);
+    cwd[sizeof(cwd) - 1] = '\0';
+  }
+  u_print("nsh:");
+  u_print(cwd);
+  u_print("> ");
+}
+
 int main(void) {
-  u_print("\nnsh -- ring-3 Nexus shell. Type 'help' for commands, 'exit' "
-          "to leave.\n");
+  print_banner();
 
   char line[LINE_MAX];
   while (!g_should_exit) {
     reap_finished_jobs();
-    u_print("nsh> ");
+    print_prompt();
     u_read_line(line, sizeof(line));
     dispatch(line);
   }

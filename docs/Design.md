@@ -171,13 +171,21 @@ been verified and what's honestly still missing. See the main
   carries the flags it was opened with; `sys_read_impl`/`sys_write_impl`
   check them) — no `O_APPEND` yet, and no permission/ownership model at
   all (single-user kernel, no concept of "whose" a file is).
-- tmpfs is still the only *real* on-disk-shaped filesystem, but it's no
-  longer the only thing in the namespace: `vfs_mount()`/`vfs_unmount()`
-  is a real, if currently unexercised, mount table (nothing else has
-  needed a second mounted filesystem yet), and the graph filesystem is
-  grafted in separately via `vfs_set_root_fallback()` — see
-  `fs/graphfs_vfs.c` and its own design note below.
-- The ELF loader only accepts static, non-PIE `ET_EXEC` binaries — no
+- GraphFS (fs/graph.c, adapted onto the classic VFS by
+  fs/graphfs_vfs.c) is now the primary, persisted root filesystem --
+  wired up via `vfs_set_root()` in main.c, not a secondary fallback
+  grafted alongside a separate root. tmpfs (fs/tmpfs.c) still exists
+  and still works, it's just not used at boot any more; `vfs_mount()`/
+  `vfs_unmount()` remains a real, currently-unexercised mount table if
+  anything wants a second filesystem grafted in later (an ephemeral
+  `/tmp`, say). `/bin` is unpacked into the graph from `initrd.tar` by
+  `blockdev_init_task` (main.c) every boot -- always refreshed to
+  match this build's binaries, while everything else the graph
+  restored from disk (gload) is left untouched -- see that task's own
+  comment for the full ordering story (disk bring-up has to happen
+  after the scheduler starts, which is why this can't happen any
+  earlier than it does).
+- The ELF loader only accepts static, non-PIE `ET_EXEC` binaries -- no
   dynamic linking, no relocations, no PIE.
 - The NVMe driver is single-namespace, single-I/O-queue, and caps a
   single request at ~2MiB (one PRP-list page, not chained). Buffers
@@ -185,9 +193,14 @@ been verified and what's honestly still missing. See the main
   queue on vector 0, I/O queue on vector 1) with no timeout on the
   wait -- consistent with every other blocking wait in this kernel; see
   the comment on drivers/nvme.c's submit_and_wait().
-  - Tab-completion's path matching only understands the classic VFS
-  namespace ("/", tmpfs, the initrd) -- graph-FS paths (gcat/gls/
-  sstring targets) don't complete yet.
+  - Tab-completion (the kernel shell's `try_complete()`) walks the
+  classic VFS namespace generically, via `vfs_readdir()` -- since
+  that's GraphFS now, ordinary paths (`/bin/`, anything reachable
+  through an sstring anchor) complete exactly like they always did.
+  What it still doesn't complete is a bare graph-native argument
+  (an sstring name or numeric id handed to `sstring`/`glink`/`grm`
+  when NOT written as a path) -- those aren't path segments at all,
+  so `try_complete()`'s path-segment logic has nothing to walk.
 - The graph filesystem (fs/graph.c) frees nodes via refcounting
   (grm/gunlink/sstringrm), with `ggc`/`gclear` as a mark-and-sweep
   backstop for reference cycles that refcounting alone can't reach --
@@ -204,6 +217,18 @@ been verified and what's honestly still missing. See the main
   the whole graph.
 
 ## Verification performed here
+
+**Note:** the log below predates GraphFS becoming the primary
+filesystem and nsh becoming the default interactive shell (see the
+GraphFS bullet under Known limitations, and the `kshell` cmdline flag
+under Kernel command line). It was accurate for the tmpfs-root/
+kernel-shell-default boot sequence it describes; the boot path itself
+has since changed (disk bring-up, graph load, `/bin` seeding, and
+shell selection all now happen inside `blockdev_init_task`, not
+synchronously in `kmain()`) and needs its own fresh pass through the
+same kind of QEMU/QMP-scripted run below before it can be trusted
+again -- flagging that explicitly rather than silently leaving a
+now-unverified claim looking verified.
 
 This was built and booted, repeatedly, in QEMU (TCG, `-M q35 -smp 4`)
 — headless, with keyboard input scripted over QEMU's QMP socket
@@ -242,6 +267,14 @@ Set from `limine.conf`'s `cmdline:` lines, or edit it directly:
 - `selftest` — after boot, automatically `run` `/bin/hello` in ring 3
   and report pass/fail before handing off to the shell — see the
   "Nexus (self-test)" boot entry in `limine.conf`.
+- `kshell` — boot into the ring-0 kernel shell (`shell/shell.c`)
+  instead of nsh (`/bin/nsh`), which is the default interactive
+  target as of GraphFS becoming the primary filesystem (see the note
+  below). The kernel shell is still where every privileged/diagnostic
+  command lives (`lspci`, `meminfo`, `reboot`/`shutdown`, `loom`, the
+  native graph commands with `gsync`/`gload`/`ggc`/`gclear`) -- nsh
+  only has what's reachable through the ordinary syscall ABI. See the
+  "Nexus (ring-0 kernel shell)" boot entry in `limine.conf`.
 
 ## Build dependencies
 

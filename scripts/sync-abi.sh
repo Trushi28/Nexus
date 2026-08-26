@@ -42,7 +42,9 @@ sync_one() {
 
 sync_one abi/syscall_nr.h kernel/src/abi/syscall_nr.h
 sync_one abi/task_info.h  kernel/src/abi/task_info.h
+sync_one abi/sysinfo.h    kernel/src/abi/sysinfo.h
 sync_one abi/syscall_nr.h userland/include/syscall_nr.h
 sync_one abi/task_info.h  userland/include/task_info.h
+sync_one abi/sysinfo.h    userland/include/sysinfo.h
 
 echo "[sync-abi] kernel/src/abi/ and userland/include/ refreshed from abi/"

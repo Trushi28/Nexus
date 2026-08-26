@@ -11,8 +11,8 @@ cd "$(dirname "$0")/.."
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-for f in kernel/src/abi/syscall_nr.h kernel/src/abi/task_info.h \
-         userland/include/syscall_nr.h userland/include/task_info.h; do
+for f in kernel/src/abi/syscall_nr.h kernel/src/abi/task_info.h kernel/src/abi/sysinfo.h \
+         userland/include/syscall_nr.h userland/include/task_info.h userland/include/sysinfo.h; do
   mkdir -p "$tmp/$(dirname "$f")"
   [ -f "$f" ] && cp "$f" "$tmp/$f" || : > "$tmp/$f.missing"
 done
@@ -20,8 +20,8 @@ done
 ./scripts/sync-abi.sh > /dev/null
 
 status=0
-for f in kernel/src/abi/syscall_nr.h kernel/src/abi/task_info.h \
-         userland/include/syscall_nr.h userland/include/task_info.h; do
+for f in kernel/src/abi/syscall_nr.h kernel/src/abi/task_info.h kernel/src/abi/sysinfo.h \
+         userland/include/syscall_nr.h userland/include/task_info.h userland/include/sysinfo.h; do
   if ! diff -u "$tmp/$f" "$f"; then
     status=1
   fi

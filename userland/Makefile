@@ -81,7 +81,7 @@ $(LIBNEXUS): $(LIBC_OBJ)
 	rm -f $@
 	$(AR) rcs $@ $(LIBC_OBJ)
 
-$(BINDIR)/%: %.c $(CRT0_OBJ) $(LIBNEXUS) libc/syscall.h include/syscall_nr.h include/task_info.h user.ld
+$(BINDIR)/%: %.c $(CRT0_OBJ) $(LIBNEXUS) libc/syscall.h include/syscall_nr.h include/task_info.h include/sysinfo.h user.ld
 	@mkdir -p $(OBJDIR) $(BINDIR)
 	$(CC) $(CFLAGS) -c $*.c -o $(OBJDIR)/$*.c.o
 	$(LD) $(LDFLAGS) $(CRT0_OBJ) $(OBJDIR)/$*.c.o $(LIBNEXUS) -o $@

@@ -40,7 +40,14 @@
 #define SYS_wait_any 17 // wait_any(int *code_out) -> pid of whichever child exited, or -1 if none left
 #define SYS_getuid 18 // getuid() -> calling task's clearance (0 == root -- see docs/Design.md's clearance note)
 #define SYS_setuid 19 // setuid(uid) -> 0 on success, -1 on refusal. Root-only, one-way drop -- see cpu/syscall.c's sys_setuid_impl.
-#define SYS_COUNT 20
+#define SYS_chdir 20 // chdir(path) -> 0, or -1 (no such directory)
+#define SYS_getcwd 21 // getcwd(buf, len) -> 0, or -1 (buf too small)
+#define SYS_reboot 22 // reboot() -> never returns on success, -1 on refusal. Root-only -- see cpu/syscall.c's sys_reboot_impl.
+#define SYS_shutdown 23 // shutdown() -> never returns on success, -1 on refusal. Root-only -- see cpu/syscall.c's sys_shutdown_impl.
+#define SYS_sysinfo 24 // sysinfo(nx_sysinfo_t *out) -> 0, or -1
+#define SYS_gsync 25 // gsync() -> 0 (saved) or -1 (no disk / save failed). Root-only.
+#define SYS_gload 26 // gload() -> 0 (loaded) or -1 (refused / no saved graph / load failed). Root-only.
+#define SYS_COUNT 27
 
 /* open() flags -- deliberately tiny; no O_APPEND yet. */
 #define O_RDONLY 0x0

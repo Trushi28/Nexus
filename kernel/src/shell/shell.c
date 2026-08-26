@@ -1,10 +1,8 @@
 #include "shell/shell.h"
 #include "abi/syscall_nr.h"
-#include "acpi/acpi.h"
 #include "apic/lapic.h"
 #include "boot/requests.h"
 #include "cpu/cpu.h"
-#include "cpu/io.h"
 #include "debug/log.h"
 #include "debug/serial.h"
 #include "drivers/keyboard.h"
@@ -13,6 +11,7 @@
 #include "fs/graph.h"
 #include "fs/vfs.h"
 #include "init/loom.h"
+#include "init/power.h"
 #include "klib/klib.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -31,81 +30,16 @@
 #define COMPLETE_MAX_MATCHES 32 // tab-completion candidate cap
 
 /* ------------------------------ working directory -------------------------
- * A real per-process cwd would live on struct task (sched/sched.h) and
- * cross the syscall boundary with a SYS_chdir -- worth doing once
- * something other than this one interactive shell task needs it, but
- * that's a bigger change (new syscall, ABI bump via abi/syscall_nr.h,
- * `make sync-abi`) than what "let me cd around" actually needs today.
- * This is deliberately the smaller, shell-local version instead: a
- * single static path this file's own command handlers consult, good
- * enough for one interactive task, with the real process-level version
- * left as later work if a second consumer ever shows up. */
-static char cwd[LINE_MAX] = "/";
-
-/* Joins `in` onto the shell's cwd (verbatim if `in` is already
- * absolute) and normalizes the result -- collapsing "." and empty
- * segments, and popping one component per ".." -- into `out`. Doesn't
- * touch the VFS at all; whether the result actually exists is up to
- * the caller to check (see cmd_cd()). Structurally the same split-
- * and-walk shape as fs/vfs.c's own walk()/split_path(), kept as its
- * own copy for the same reason vfs.c gives its two internal copies:
- * this is shell-local, cwd-aware path math that has no business
- * living in the VFS layer itself. */
-#define CWD_MAX_DEPTH 16
-
+ * A real per-task cwd now lives on struct task itself (sched/sched.h's
+ * `cwd` field, set via SYS_chdir) -- this shell task's own is exactly
+ * `this_cpu()->current_task->cwd`, the same field nsh's ring-3
+ * SYS_chdir/SYS_getcwd read and write. What used to be a shell-local
+ * static plus this file's own private split-and-normalize copy is now
+ * just a thin wrapper over fs/vfs.c's shared vfs_resolve_relative() --
+ * see that function's own comment for why it's the one place this
+ * logic lives at all. */
 static void resolve_path(const char *in, char *out, size_t out_max) {
-  char combined[LINE_MAX * 2];
-  if (in[0] == '/') {
-    strncpy(combined, in, sizeof(combined) - 1);
-    combined[sizeof(combined) - 1] = '\0';
-  } else {
-    ksnprintf(combined, sizeof(combined), "%s/%s", cwd, in);
-  }
-
-  char comps[CWD_MAX_DEPTH][64];
-  int depth = 0;
-
-  const char *p = combined;
-  while (*p == '/') {
-    p++;
-  }
-  while (*p != '\0' && depth < CWD_MAX_DEPTH) {
-    size_t n = 0;
-    while (*p != '\0' && *p != '/') {
-      if (n + 1 < sizeof(comps[0])) {
-        comps[depth][n++] = *p;
-      }
-      p++;
-    }
-    comps[depth][n] = '\0';
-
-    if (strcmp(comps[depth], "..") == 0) {
-      if (depth > 0) {
-        depth--;
-      }
-    } else if (comps[depth][0] != '\0' && strcmp(comps[depth], ".") != 0) {
-      depth++;
-    }
-    while (*p == '/') {
-      p++;
-    }
-  }
-
-  if (depth == 0) {
-    strncpy(out, "/", out_max - 1);
-    out[out_max - 1] = '\0';
-    return;
-  }
-
-  size_t off = 0;
-  out[0] = '\0';
-  for (int i = 0; i < depth; i++) {
-    int n = ksnprintf(out + off, out_max - off, "/%s", comps[i]);
-    if (n < 0 || (size_t)n >= out_max - off) {
-      break;
-    }
-    off += (size_t)n;
-  }
+  vfs_resolve_relative(this_cpu()->current_task->cwd, in, out, out_max);
 }
 
 /* ------------------------------- line editing --------------------------- */
@@ -115,7 +49,7 @@ static void print_prompt(void) {
   console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
   kprintf_locked("nexus");
   console_set_colors(NX_COLOR_DIM, NX_COLOR_BG);
-  kprintf_locked(":%s", cwd);
+  kprintf_locked(":%s", this_cpu()->current_task->cwd);
   console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
   kprintf_locked("> ");
   kprintf_lock_release(flags);
@@ -565,7 +499,7 @@ static void try_complete(char *buf, uint32_t *len, uint32_t max) {
    * relative-path handling (resolve_path()). A slash in the prefix
    * still overrides this with its own (possibly relative, possibly
    * absolute) directory fragment, resolved the same way. */
-  const char *dir_path = cwd;
+  const char *dir_path = this_cpu()->current_task->cwd;
   char dir_buf[LINE_MAX];
   char resolved_dir[LINE_MAX];
   const char *seg_prefix = prefix;
@@ -1125,12 +1059,12 @@ static void cmd_cat(const char *args) {
   vfs_close(f);
 }
 
-/* Changes the shell's own cwd -- see resolve_path()'s comment for what
- * "changes" means here (a shell-local static, not a real per-process
- * field). Verifies the target actually resolves to a directory before
- * committing it, so a typo leaves the old cwd in place with a clear
- * error rather than silently pointing the prompt somewhere that will
- * just fail every subsequent relative lookup. */
+/* Changes the shell's own cwd -- a real field on this task's own
+ * struct task now (sched/sched.h), the same one SYS_chdir writes for
+ * a ring-3 task. Verifies the target actually resolves to a directory
+ * before committing it, so a typo leaves the old cwd in place with a
+ * clear error rather than silently pointing the prompt somewhere that
+ * will just fail every subsequent relative lookup. */
 static void cmd_cd(const char *args) {
   char resolved[LINE_MAX];
   resolve_path(*args == '\0' ? "/" : args, resolved, sizeof(resolved));
@@ -1141,8 +1075,9 @@ static void cmd_cd(const char *args) {
     return;
   }
 
-  strncpy(cwd, resolved, sizeof(cwd) - 1);
-  cwd[sizeof(cwd) - 1] = '\0';
+  struct task *t = this_cpu()->current_task;
+  strncpy(t->cwd, resolved, sizeof(t->cwd) - 1);
+  t->cwd[sizeof(t->cwd) - 1] = '\0';
 }
 
 /* Shared implementation behind cmd_run() (always spawns at uid 0 --
@@ -1343,35 +1278,16 @@ static void cmd_matrix(const char *args) {
 
 static void cmd_reboot(const char *args) {
   (void)args;
-  loom_shutdown_all();
-  if (graph_is_dirty()) {
-    kprintf("graph has unsaved changes -- saving before reboot...\n");
-    graph_save_to_disk(); /* logs its own outcome; a failed save still
-                              falls through to reboot -- refusing to
-                              reboot over a save failure would be
-                              worse */
-  }
-  kprintf("rebooting...\n");
-  timer_busy_wait_ms(50);
-  uint8_t status;
-  do {
-    status = inb(0x64);
-  } while (status & 0x02);
-  outb(0x64, 0xFE);
-  hang();
+  power_reboot(); /* never returns -- see init/power.c; also what
+                      cpu/syscall.c's SYS_reboot calls for a ring-3
+                      `reboot` (root-only) */
 }
 
 static void cmd_shutdown(const char *args) {
   (void)args;
-  loom_shutdown_all();
-  if (graph_is_dirty()) {
-    kprintf("graph has unsaved changes -- saving before shutdown...\n");
-    graph_save_to_disk();
-  }
-  kprintf("shutting down...\n");
-  timer_busy_wait_ms(50);
-  acpi_shutdown(); /* never returns -- real ACPI / QEMU-hack / halt
-                       fallback chain lives in acpi.c */
+  power_shutdown(); /* never returns -- see init/power.c; also what
+                         cpu/syscall.c's SYS_shutdown calls for a
+                         ring-3 `shutdown` (root-only) */
 }
 
 static void cmd_aliases(const char *args) {
@@ -1840,12 +1756,12 @@ void shell_task(void *arg) {
   kprintf("\n");
   console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
   print_box_border_top();
-  print_box_line(" NEXUS -- x86-64 kernel shell");
+  print_box_line(" NEXUS -- ring-0 kernel shell (kshell)");
   char status[BOX_INNER_WIDTH + 1];
   ksnprintf(status, sizeof(status), " %u cpu(s) online, x2APIC %s", g_cpu_count,
             lapic_using_x2apic() ? "on" : "off");
   print_box_line(status);
-  print_box_line(" type 'help' for commands, up/down for history");
+  print_box_line(" nsh is the default shell -- 'help', history up/dn");
   print_box_border_bottom();
   console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
   kprintf("\n");

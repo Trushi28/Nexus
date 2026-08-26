@@ -59,6 +59,22 @@ struct gnode {
                                one. */
   uint32_t owner_uid;
 
+  /* Whether fs/graphfs_vfs.c's classic-VFS adapter presents this node
+   * as a file or a directory -- decided ONCE, the moment the node
+   * gains its first outgoing edge (see graph_link()) or is explicitly
+   * created as a directory through the classic namespace (mkdir-style
+   * vfs_lookup_or_create(), or an intermediate path component --
+   * graphfs_node_create()/graphfs_root_create()), and never flips back.
+   * A gnode isn't inherently file-XOR-directory the way a real vnode
+   * is -- it can hold content AND outgoing edges at once -- so without
+   * a persisted decision here, the adapter used to recompute this from
+   * edge_count on every single access, meaning the SAME path could
+   * change shape (a file you could gcat one moment, a directory you
+   * could ls the next) as the graph evolved elsewhere. Defaults to
+   * VNODE_FILE (0), which is exactly what a fresh slab_alloc()'d gnode
+   * already zeroes to -- see graph_node_create(). */
+  enum vnode_type classic_type;
+
   struct vnode vfs_node; /* embedded classic-VFS adapter for this node
                              (see fs/graphfs_vfs.c) -- re-populated
                              fresh on every access through that

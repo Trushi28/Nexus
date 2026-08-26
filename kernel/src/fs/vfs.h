@@ -134,25 +134,35 @@ bool vfs_mount(const char *path, struct vnode *root);
  * *under* it -- unmount those first. */
 bool vfs_unmount(const char *path);
 
-/* Registers `fallback` as a second, transparent root: consulted, at
- * the TOP level only (a single path component directly under "/"),
- * whenever the primary root's own lookup/create doesn't have the
- * name -- no path prefix involved, unlike vfs_mount(). This is how
- * fs/graphfs_vfs.c's sstring-anchored graph nodes show up as ordinary
- * top-level entries (e.g. "photos") right alongside tmpfs's own,
- * rather than needing a dedicated mount point. Pass NULL to disable.
- * Entirely generic on this end -- vfs.c never assumes the fallback is
- * graphfs specifically, it just dispatches through vnode_ops like any
- * other vnode. */
-void vfs_set_root_fallback(struct vnode *fallback);
-
 /* Resolves an absolute, '/'-separated path to a vnode ("/" or ""
  * itself resolves to the root). Returns NULL if any path component is
- * missing. v1 has no working-directory concept -- every path is
- * absolute whether or not it starts with '/'. Never gated by
- * ownership -- see struct vnode::owner_uid's comment on why reading
- * is always unrestricted. */
+ * missing. Always absolute, whether or not `path` starts with '/' --
+ * this function itself has no working-directory concept; see
+ * vfs_resolve_relative() below for the piece that adds one on top.
+ * Never gated by ownership -- see struct vnode::owner_uid's comment
+ * on why reading is always unrestricted. */
 struct vnode *vfs_lookup_path(const char *path);
+
+/* Joins `in` onto `cwd` (verbatim if `in` is already absolute) and
+ * normalizes the result into `out` -- collapsing "." and empty
+ * segments, and popping one component per ".." -- WITHOUT touching
+ * the VFS at all; whether the result actually exists is up to the
+ * caller to check afterward (typically via vfs_lookup_path() or
+ * vfs_open()). This is the one piece of cwd-awareness in the whole
+ * VFS layer: every lookup/open/create function above stays strictly
+ * absolute-path, cwd-agnostic, and this is the single place a caller
+ * that DOES have a notion of "current directory" -- the kernel
+ * shell's own interactive cwd, or a ring-3 task's struct task::cwd
+ * (sched/sched.h), set via SYS_chdir -- turns a possibly-relative
+ * path into one of those absolute paths first. Shared rather than
+ * duplicated per-caller: the kernel shell (shell/shell.c) and the
+ * syscall layer (cpu/syscall.c's sys_open_impl/sys_readdir_impl/
+ * sys_spawn_impl/sys_exec_impl/sys_chdir_impl) all call this exact
+ * function instead of each keeping their own copy of the same
+ * split-and-normalize logic. */
+#define VFS_RESOLVE_MAX_DEPTH 16
+void vfs_resolve_relative(const char *cwd, const char *in, char *out,
+                          size_t out_max);
 
 /* Like vfs_lookup_path(), but creates any missing intermediate path
  * components as directories, and the final component (if missing) as
