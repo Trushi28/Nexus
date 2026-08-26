@@ -1,4 +1,5 @@
 #include "video/console.h"
+#include "klib/utf8.h"
 #include "video/fb.h"
 #include "video/nx_box8x8.h"
 #include "video/nx_font8x8.h"
@@ -162,8 +163,26 @@ void console_putc_box_at(uint32_t col, uint32_t row, enum nx_box_glyph g) {
 }
 
 void console_puts(const char *s) {
-  while (*s) {
-    console_putc(*s++);
+  size_t len = strlen(s);
+  size_t i = 0;
+
+  while (i < len) {
+    size_t consumed;
+    uint32_t cp = utf8_decode(s + i, len - i, &consumed);
+    i += consumed;
+
+    if (cp < 0x80) {
+      console_putc((char)cp);
+      continue;
+    }
+
+    enum nx_box_glyph g;
+    if (nx_box_glyph_from_codepoint(cp, &g)) {
+      console_putc_box(g);
+      continue;
+    }
+
+    console_putc('?');
   }
 }
 

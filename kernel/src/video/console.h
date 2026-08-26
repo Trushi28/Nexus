@@ -17,7 +17,21 @@
 
 void console_init(void);
 void console_clear(void);
+
+/* Writes one raw byte at the cursor -- always ASCII, never UTF-8
+ * decoded. Every direct caller (the shell's line editor echoing a
+ * keystroke, console_puts()'s own decode loop below, console_putc_box())
+ * only ever hands this one already-known single byte at a time, so
+ * there's nothing here that needs multi-byte awareness. */
 void console_putc(char c);
+
+/* Writes a full string at the cursor, advancing/wrapping/scrolling as
+ * needed -- and, unlike console_putc(), UTF-8 aware: a multi-byte
+ * sequence matching one of nx_box8x8.h's 22 box-drawing codepoints
+ * renders as that glyph, and anything else undecodable renders as a
+ * single '?' (never several, one per raw byte) -- see klib/utf8.h and
+ * this function's own comment in console.c for the full story. Plain
+ * ASCII is unaffected either way. */
 void console_puts(const char *s);
 void console_set_colors(uint32_t fg, uint32_t bg);
 
@@ -41,10 +55,16 @@ uint32_t console_rows(void);
 void console_putc_at(uint32_t col, uint32_t row, char c);
 
 /* Box-drawing counterparts to console_putc()/console_putc_at() -- see
- * video/nx_box8x8.h for exactly which 22 glyphs and why these are
- * separate, explicitly-named entry points rather than something that
- * flows through console_putc()'s ordinary `char` pipeline (there's no
- * UTF-8 decoding anywhere in this kernel, and these aren't ASCII).
+ * video/nx_box8x8.h for exactly which 22 glyphs. Separate,
+ * explicitly-named entry points rather than something a caller reaches
+ * by encoding the actual UTF-8 bytes and going through console_puts()
+ * -- shell/shell.c's box-drawing helpers (print_box_border(),
+ * print_divider(), ...) are building fixed UI chrome from a known
+ * enum value, not printing arbitrary text that might happen to
+ * contain one of these, so there's no byte-stream decoding to pay for
+ * on that path. console_puts() (above) is the one that DOES decode
+ * UTF-8 and can also reach these same 22 glyphs, for arbitrary text
+ * that contains them.
  * Same cell size, same suspended/bounds behavior as their console_putc*
  * equivalents. */
 void console_putc_box(enum nx_box_glyph g);

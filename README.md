@@ -47,14 +47,25 @@ from scratch rather than borrowed from the bootloader.
 
 ## Getting started
 
-**Requirements:** `make`, a native `gcc`/`clang` + `ld` (no cross-compiler needed), `curl`, `xorriso`, `sgdisk`, `mtools`. `qemu-system-x86_64` is optional.
+**Requirements:** `make`, an `x86_64-elf` cross toolchain (`x86_64-elf-gcc`/`x86_64-elf-ld`/`x86_64-elf-ar`), `curl`, `xorriso`, `sgdisk`, `mtools`. `qemu-system-x86_64` is optional.
 
 ```sh
+# Arch (AUR):
+yay -S x86_64-elf-gcc x86_64-elf-binutils
+
+# macOS (Homebrew):
+brew install x86_64-elf-gcc x86_64-elf-binutils
+
+# Anything else: build one yourself -- see the OSDev.org "GCC Cross-
+# Compiler" tutorial (https://wiki.osdev.org/GCC_Cross-Compiler).
+
 sudo apt install build-essential curl xorriso gdisk mtools qemu-system-x86
 
 make all-hdd      # -> nexus.hdd (raw disk/USB image)
 make all          # -> nexus.iso (BIOS+UEFI hybrid)
 ```
+
+No cross toolchain? Every native `gcc`/`clang` + `ld` flag this build needs is already explicit (`-ffreestanding`, no implicit CRT, etc. -- see `kernel/Makefile`'s own comment), so falling back to the host toolchain still works fine: `make CC=cc LD=ld` (kernel) / `make CC=cc LD=ld AR=ar` (userland).
 
 Run it:
 

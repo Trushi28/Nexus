@@ -1,11 +1,11 @@
 # Nexus userland demo programs.
 #
-# Same trick the kernel build already relies on -- your distro's native
-# gcc/clang + ld work fine for a freestanding, -nostdlib target, we
-# don't need a dedicated cross toolchain. Unlike the kernel (a
-# relocatable PIE, per Limine's requirements), these are static,
-# non-PIE ET_EXEC binaries: see user.ld and proc/elf.c's loader, which
-# only understands that shape.
+# Defaults to a real x86_64-elf cross toolchain now (see
+# kernel/Makefile's own comment on CC/LD for the full reasoning --
+# same applies here). Unlike the kernel (a relocatable PIE, per
+# Limine's requirements), these are static, non-PIE ET_EXEC binaries:
+# see user.ld and proc/elf.c's loader, which only understands that
+# shape.
 #
 # libc/ is Nexus's own tiny freestanding libc-equivalent (ulib.*,
 # crt0.S, syscall.h) -- built once into libnexus.a and linked into
@@ -21,9 +21,13 @@
 # inside userland/ still works standalone (BUILD_DIR defaults to
 # userland/build).
 
-CC := cc
-LD := ld
-AR := ar
+# Plain `:=` assignments, same as before -- still override-able from
+# the command line (`make CC=cc LD=ld AR=ar`) if a cross compiler
+# isn't installed, since a command-line `make VAR=value` always wins
+# over any in-makefile assignment regardless of operator.
+CC := x86_64-elf-gcc
+LD := x86_64-elf-ld
+AR := x86_64-elf-ar
 
 override BUILD_DIR := $(abspath $(if $(BUILD_DIR),$(BUILD_DIR),build))
 override OBJDIR := $(BUILD_DIR)/obj

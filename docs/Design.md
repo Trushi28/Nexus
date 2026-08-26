@@ -103,6 +103,29 @@ been verified and what's honestly still missing. See the main
   background pass) powers both `topcmds` and tie-breaking in
   suggestions. Tab completes command names always, and VFS path
   segments for the last argument.
+- **UTF-8 decoding lives at exactly one layer: `console_puts()`, not
+  `console_putc()`**: `klib/utf8.c`'s `utf8_decode()` is a small,
+  allocation-free, RFC 3629-conformant decoder (1-4 byte sequences,
+  rejects overlong encodings and lone surrogates), and
+  `video/console.c`'s `console_puts()` is the one place it's actually
+  used -- decoding a formatted string in one pass, rendering a
+  recognized box-drawing codepoint (`video/nx_box8x8.h`'s 22 glyphs)
+  through the existing glyph table, and falling back to a single '?'
+  for anything else (never one '?' per raw byte, which is what
+  printing an undecoded multi-byte sequence one byte at a time used to
+  produce). `console_putc()` itself deliberately stays a raw
+  single-byte pass-through -- every direct caller of it only ever
+  hands it one already-known ASCII byte (a PS/2 keystroke, which can't
+  produce anything >= 0x80 in the first place -- see
+  `drivers/keyboard.c`), so there's no multi-byte sequence to ever
+  assemble there. `serial_puts()` (the other half of every `kprintf()`)
+  deliberately does NOT get UTF-8 decoding -- a real terminal on the
+  other end of the wire already understands UTF-8 natively, so
+  decoding and re-encoding it here would be pure overhead for no
+  benefit. This closes a real, visible bug: `cat`/`gcat`-ing GraphFS
+  content containing real multi-byte Unicode (box-drawing characters
+  pasted in from elsewhere, say) used to render every byte of it as
+  its own garbled placeholder.
   - **Graph FS persistence is a whole-graph snapshot, not a live on-disk
   structure**: graph_save_to_disk()/graph_load_from_disk() (fs/graph.c)
   serialize/deserialize the entire in-memory graph in one shot to/from
@@ -215,6 +238,26 @@ been verified and what's honestly still missing. See the main
   whole-graph snapshot (gsync/gload), not continuous durability, capped
   at GRAPH_SNAPSHOT_MAX_BYTES (1MiB by default). One coarse lock covers
   the whole graph.
+- UTF-8 decoding (`klib/utf8.c`, wired into `console_puts()`) only
+  ever renders a codepoint that matches one of `nx_box8x8.h`'s 22
+  box-drawing glyphs -- everything else valid-but-unmapped (accented
+  Latin, CJK, emoji, you name it) falls back to a plain '?', same as
+  an out-of-range single byte always has. There's no combining-
+  character support and no wide/fullwidth glyph-width accounting (a
+  CJK character would take the same single 8x8 cell as anything else,
+  which is wrong, it just doesn't come up yet since nothing renders
+  one). Extending glyph coverage is mechanical (another table +
+  another `nx_*_glyph_from_codepoint()`-shaped lookup) but is
+  genuinely separate work from the decoder itself -- drawing new 8x8
+  bitmap glyphs by hand is real, visual, per-glyph effort, not
+  something to improvise a large batch of unreviewed. `console_putc()`
+  itself is untouched -- still a raw single-byte pass-through, since
+  every direct caller of it only ever hands it one already-known ASCII
+  byte (see the design note above for the full reasoning). Keyboard
+  INPUT is still pure single-byte ASCII too -- Scan Code Set 1 US
+  QWERTY has no way to produce anything else -- so there's no way to
+  type a non-ASCII character in, only to display one that arrived some
+  other way (a GraphFS file's content, mainly).
 
 ## Verification performed here
 

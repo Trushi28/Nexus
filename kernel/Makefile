@@ -31,13 +31,23 @@ define DEFAULT_VAR =
     endif
 endef
 
-# It is suggested to use a custom-built cross toolchain to build a kernel,
-# but a standard Linux host gcc/clang + binutils targeting x86-64 works
-# fine too, which is what this defaults to.
-override DEFAULT_CC := cc
+# Defaults to a real x86_64-elf cross toolchain (e.g. Arch's AUR
+# `x86_64-elf-gcc` package, or the OSDev.org "GCC Cross-Compiler"
+# tutorial's own build) rather than the host's native gcc/clang +
+# binutils. Both have always worked here -- every freestanding-build
+# flag this kernel needs (-ffreestanding, -fno-stack-protector, no
+# implicit CRT/libc, etc.) is already explicit below rather than
+# assumed from a hosted-target default -- but a genuine x86_64-elf
+# target has no hosted-target assumptions to override in the first
+# place (no default PIE-by-distro, no implicit stack-protector-strong,
+# no host-triple-specific quirks), which is the textbook-correct way
+# to build a freestanding kernel. Still fully override-able, e.g.
+# `make CC=cc LD=ld` to fall back to the host toolchain if a cross
+# compiler isn't installed.
+override DEFAULT_CC := x86_64-elf-gcc
 $(eval $(call DEFAULT_VAR,CC,$(DEFAULT_CC)))
 
-override DEFAULT_LD := ld
+override DEFAULT_LD := x86_64-elf-ld
 $(eval $(call DEFAULT_VAR,LD,$(DEFAULT_LD)))
 
 # User-controllable C flags.

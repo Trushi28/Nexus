@@ -9,26 +9,31 @@
  * chrome (borders, dividers, box-drawn banners) wants: U+2500-U+253C
  * (light) and U+2550-U+256C (double).
  *
- * This is deliberately NOT a step toward general Unicode text
- * support. Nexus's whole text pipeline -- kprintf()/kvsnprintf()
- * (klib/printf.c), console_putc()/console_puts() (video/console.c),
- * even keyboard input (drivers/keyboard.c) -- is single-byte/ASCII
- * throughout, with no UTF-8 decoder anywhere. Building one just to
- * let a handful of box-drawing glyphs flow through kprintf("%s", ...)
- * would be a large, separate undertaking (multi-byte sequence
- * decoding, combining characters, width -- box-drawing is the easy
- * 1-column case, general Unicode is not) for very little payoff here.
- * Instead, these 22 glyphs are addressable directly, by name, via
- * console_putc_box()/console_putc_box_at() (video/console.h) --
- * exactly the primitive shell/shell.c's box-drawing helpers
- * (print_box_border(), print_divider(), ...) actually need, with no
- * byte-stream decoding involved at all.
+ * This is NOT a step toward general Unicode text SHAPING support --
+ * still no combining characters, no bidi, no wide/fullwidth glyph
+ * width accounting. It IS, as of klib/utf8.c, wired up to a real
+ * (if deliberately minimal) UTF-8 decoder: console_puts()
+ * (video/console.c) -- what every kprintf("%s", ...) funnels a
+ * formatted string through in one shot -- decodes multi-byte
+ * sequences and renders anything matching one of these 22 codepoints
+ * through this table, falling back to a plain '?' for anything else.
+ * console_putc() itself stays a raw single-byte pass-through, since
+ * every direct caller of it only ever hands it one already-known
+ * ASCII byte (a keystroke off the PS/2 keyboard, which can't produce
+ * anything >= 0x80 at all -- see drivers/keyboard.c). These 22 glyphs
+ * are ALSO still addressable directly, by name, via
+ * console_putc_box()/console_putc_box_at() (video/console.h) -- the
+ * primitive shell/shell.c's box-drawing helpers (print_box_border(),
+ * print_divider(), ...) use, with no byte-stream decoding involved at
+ * all, since they're building UI chrome from a fixed enum, not
+ * printing arbitrary text that might happen to contain one of these.
  *
- * nx_box_glyph_from_codepoint() exists purely so that IF a real UTF-8
- * decoder ever gets bolted onto the input side of this pipeline, the
- * glyph data and the "which Unicode codepoint is this" mapping are
- * already sitting right here, ready to be wired up -- not because
- * anything in this kernel currently produces or consumes UTF-8.
+ * nx_box_glyph_from_codepoint() is what console_puts() (via
+ * klib/utf8.h's utf8_decode()) actually calls now -- see that
+ * function's own comment for the fuller story of why this mattered
+ * (GraphFS content is arbitrary bytes; catting a file with real
+ * Unicode in it used to render every byte of a multi-byte sequence as
+ * its own garbled placeholder instead of one correct glyph).
  *
  * Storage/bit convention: identical to nx_font8x8.h -- one byte per
  * row (top to bottom), bit x (1 << x) set means "pixel on" at column
