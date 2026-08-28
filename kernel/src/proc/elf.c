@@ -7,7 +7,7 @@
 
 /* Limits for program-header count and total PT_LOAD footprint. */
 #define ELF_MAX_PHDRS 64
-#define ELF_MAX_TOTAL_PAGES (256ull * 1024) /* 1 GiB across every PT_LOAD segment combined */
+#define ELF_MAX_TOTAL_PAGES (256ull * 1024) /* 1 GiB */
 
 static bool ranges_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start, uint64_t b_end) {
   return a_start < b_end && b_start < a_end;
@@ -117,7 +117,6 @@ bool elf_load(uint64_t pml4_phys, const uint8_t *data, size_t size, struct elf_l
       continue;
     }
     if (ph->p_memsz == 0) {
-    // Nothing to map for an empty loadable segment.
       continue;
     }
     if (ph->p_filesz > ph->p_memsz) {
@@ -154,7 +153,7 @@ bool elf_load(uint64_t pml4_phys, const uint8_t *data, size_t size, struct elf_l
     return false;
   }
 
-  // Reject the null guard page and addresses outside the user range.
+  // Validate relationships between loadable segments before mapping.
   if (!validate_segments(phdrs, eh->e_phnum)) {
     return false; /* already logged why */
   }
