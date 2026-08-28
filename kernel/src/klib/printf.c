@@ -1,25 +1,16 @@
 #include "klib/klib.h"
 
 /*
- * A small, dependency-free printf core. Supports the subset that a kernel
- * actually needs:
+ * Small, dependency-free printf core.
  *
- *   %d %i   signed decimal
- *   %u      unsigned decimal
- *   %x %X   unsigned hex (lower/upper)
- *   %p      pointer (0x-prefixed hex)
- *   %s      string (NULL-safe: prints "(null)")
- *   %c      character
- *   %%      literal percent
+ * Supported conversions:
+ *   %d %i %u %x %X %p %s %c %%
  *
- * Width and zero-padding are supported for numeric conversions, e.g.
- * "%08x" or "%4d". No floating point -- the kernel has no business
- * formatting floats, and we build with -mno-sse anyway.
+ * Numeric width and zero-padding are supported. Floating-point
+ * formatting is intentionally unsupported.
  *
- * Writes into a caller-supplied buffer like standard snprintf: always
- * NUL-terminates if size > 0, returns the number of characters that
- * *would* have been written (excluding the NUL) so truncation can be
- * detected the usual way.
+ * Matches snprintf semantics: returns the number of characters that
+ * would have been written and NUL-terminates when size > 0.
  */
 
 struct sink {
@@ -41,8 +32,7 @@ static void sink_puts(struct sink *s, const char *str) {
     }
 }
 
-static void print_uint(struct sink *s, uint64_t val, unsigned base,
-                        bool upper, int width, bool zero_pad) {
+static void print_uint(struct sink *s, uint64_t val, unsigned base, bool upper, int width, bool zero_pad) {
     static const char *digits_lower = "0123456789abcdef";
     static const char *digits_upper = "0123456789ABCDEF";
     const char *digits = upper ? digits_upper : digits_lower;
@@ -108,9 +98,7 @@ int kvsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             p++;
         }
 
-        /* Length modifiers: we only care about distinguishing 64-bit from
-         * the default int-sized argument, so 'l'/'ll'/'z' are all treated
-         * the same (promoted varargs are at least int-sized anyway). */
+        // Treat l, ll, and z as 64-bit arguments.
         bool longarg = false;
         while (*p == 'l' || *p == 'z') {
             longarg = true;

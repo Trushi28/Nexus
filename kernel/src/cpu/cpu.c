@@ -15,8 +15,7 @@ void cpu_enable_nx(void) {
   wrmsr(IA32_EFER, efer | EFER_NXE);
 }
 
-struct cpu_local *cpu_local_create(uint32_t cpu_index, uint32_t lapic_id,
-                                   uint32_t processor_id, bool is_bsp) {
+struct cpu_local *cpu_local_create(uint32_t cpu_index, uint32_t lapic_id, uint32_t processor_id, bool is_bsp) {
   uint64_t phys = pmm_alloc_pages(2);
   struct cpu_local *cpu = (struct cpu_local *)phys_to_virt(phys);
 

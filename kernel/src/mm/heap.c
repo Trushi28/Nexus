@@ -8,12 +8,10 @@
 #define MIN_GROW_PAGES 32
 
 struct block_header {
-  size_t size; /* usable bytes following this header */
+  size_t size; // usable bytes following this header
   bool free;
-  struct block_header *next; /* next block in ADDRESS order */
-  struct block_header *prev; /* previous block in ADDRESS order --
-                                 needed so kfree() can coalesce
-                                 backward, not just forward */
+  struct block_header *next; // next block in ADDRESS order
+  struct block_header *prev; // Enables backward coalescing.
 } __attribute__((aligned(HEAP_ALIGN)));
 
 static struct block_header *heap_head = NULL;
@@ -44,7 +42,6 @@ static bool grow_heap(size_t min_size) {
   blk->free = true;
   capacity_bytes += pages * PAGE_SIZE;
 
-  /* Insert in address order. */
   if (heap_head == NULL || blk < heap_head) {
     blk->prev = NULL;
     blk->next = heap_head;
@@ -119,7 +116,6 @@ void *kmalloc(size_t size) {
       spinlock_release_irqrestore(&heap_lock, flags);
       return NULL;
     }
-    /* loop again now that grow_heap() has added a suitable block */
   }
 }
 
@@ -135,7 +131,7 @@ static void coalesce_forward(struct block_header *b) {
   while (b->next != NULL && b->next->free) {
     uint8_t *end_of_b = (uint8_t *)b + sizeof(struct block_header) + b->size;
     if (end_of_b != (uint8_t *)b->next) {
-      break; /* not physically adjacent -- separate growth region */
+      break; // not physically adjacent -- separate growth region
     }
 
     struct block_header *dead = b->next;

@@ -49,16 +49,9 @@ static inline uint32_t pack_rgb(uint32_t rgb) {
   return (rv << r_shift) | (gv << g_shift) | (bv << b_shift);
 }
 
-/* Inverse of pack_rgb() -- unpacks a raw hardware pixel value back
- * into 0x00RRGGBB, using the same red/green/blue mask size/shift
- * fb_init() recorded from Limine's framebuffer response. Only
- * fb_blend_pixel() needs this: every other primitive here is
- * write-only, since nothing before it ever needed to read a pixel
- * back. Lossy the same way pack_rgb() is lossy (a mode with fewer
- * than 8 bits per channel loses precision going in, and this widens
- * it back out via a left-shift rather than reconstructing bits that
- * were never stored) -- fine for blending translucent UI chrome, not
- * meant for anything that needs bit-exact colour round-tripping. */
+/* Converts a framebuffer pixel value back to 0x00RRGGBB.
+ * Used by fb_blend_pixel(); precision may be lost in low-bit-depth modes. */
+
 static inline uint32_t unpack_rgb(uint32_t raw) {
   uint32_t r_mask = (1u << r_size) - 1u;
   uint32_t g_mask = (1u << g_size) - 1u;
@@ -106,26 +99,18 @@ void fb_blend_pixel(uint64_t x, uint64_t y, uint32_t rgb, uint8_t alpha) {
 
   uint32_t dst_rgb = unpack_rgb(read_raw_pixel(x, y));
 
-  uint8_t sr = (uint8_t)(rgb >> 16), sg = (uint8_t)(rgb >> 8),
-          sb = (uint8_t)rgb;
-  uint8_t dr = (uint8_t)(dst_rgb >> 16), dg = (uint8_t)(dst_rgb >> 8),
-          db = (uint8_t)dst_rgb;
+  uint8_t sr = (uint8_t)(rgb >> 16), sg = (uint8_t)(rgb >> 8), sb = (uint8_t)rgb;
+  uint8_t dr = (uint8_t)(dst_rgb >> 16), dg = (uint8_t)(dst_rgb >> 8), db = (uint8_t)dst_rgb;
 
-  /* Plain integer linear interpolation -- this build has no FPU
-   * (-mno-80387/-mno-sse/-mno-mmx, see kernel/Makefile), so every
-   * blend anywhere in this kernel has to stay fixed-point/integer. */
-  uint8_t out_r =
-      (uint8_t)(((uint32_t)sr * alpha + (uint32_t)dr * (255 - alpha)) / 255);
-  uint8_t out_g =
-      (uint8_t)(((uint32_t)sg * alpha + (uint32_t)dg * (255 - alpha)) / 255);
-  uint8_t out_b =
-      (uint8_t)(((uint32_t)sb * alpha + (uint32_t)db * (255 - alpha)) / 255);
+  // Integer alpha blending; the kernel does not use floating-point here.
+  uint8_t out_r = (uint8_t)(((uint32_t)sr * alpha + (uint32_t)dr * (255 - alpha)) / 255);
+  uint8_t out_g = (uint8_t)(((uint32_t)sg * alpha + (uint32_t)dg * (255 - alpha)) / 255);
+  uint8_t out_b = (uint8_t)(((uint32_t)sb * alpha + (uint32_t)db * (255 - alpha)) / 255);
 
   fb_put_pixel(x, y, ((uint32_t)out_r << 16) | ((uint32_t)out_g << 8) | out_b);
 }
 
-void fb_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h,
-                  uint32_t rgb) {
+void fb_fill_rect(uint64_t x, uint64_t y, uint64_t w, uint64_t h, uint32_t rgb) {
   if (!fb_ok) {
     return;
   }

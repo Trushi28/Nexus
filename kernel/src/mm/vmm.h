@@ -10,10 +10,8 @@
 #define VMM_PCD (1ULL << 4)
 #define VMM_NX (1ULL << 63)
 
-/* Builds Nexus's own kernel page tables (direct map covering all of
- * physical memory + the kernel image mapped with correct W^X
- * permissions), then switches CR3 to them. Call once, on the BSP, after
- * pmm_init(). Every AP just needs vmm_load_kernel_pagemap(). */
+/* Map only physical regions reported by the boot memory map. Mapping every
+ * address up to the highest physical address can waste page tables on gaps. */
 void vmm_init(void);
 
 uint64_t vmm_kernel_pml4_phys(void);
@@ -25,78 +23,27 @@ void vmm_load_kernel_pagemap(void);
 void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags);
 
-/* --------------------------- address spaces --------------------------
- * Per-process (ring-3) page tables. A new address space starts with the
- * kernel's own upper-half mapping (direct map, kernel image, MMIO
- * window) shared wholesale -- see vmm_new_address_space()'s comment --
- * and an empty lower half, ready for vmm_map_page_in()/elf_load() to
- * populate with one process's own private mappings.
- * ---------------------------------------------------------------------- */
-
-/* Allocates a fresh PML4 with the kernel's upper half pre-populated.
- * Returns its physical address, or 0 on OOM. */
 uint64_t vmm_new_address_space(void);
 
-/* Deep-copies `src_pml4_phys`'s entire LOWER half (user space) into a
- * brand new address space -- the kernel's own upper half is shared the
- * same way vmm_new_address_space() already shares it (fresh copy of
- * those PML4 entries, not the user pages beneath them). Every
- * currently-mapped user page gets its own fresh physical frame with
- * byte-identical contents and identical flags at the identical virtual
- * address -- there's no copy-on-write here, this is a real, immediate,
- * full copy (see docs/Design.md's note on why: correctness before
- * optimization, same tradeoff this codebase makes everywhere else).
- * Used by sys_split_impl() (cpu/syscall.c) to give a new task its own
- * independent copy of the calling task's current memory image. Returns
- * 0 on OOM partway through (having freed whatever it had already
- * built -- never leaves a half-copied address space behind for the
- * caller to clean up). */
+/* Allocates a new address space with the kernel upper half pre-populated.
+ * Returns its physical PML4 address, or 0 on OOM. */
 uint64_t vmm_copy_address_space(uint64_t src_pml4_phys);
 
-/* Like vmm_map_page()/vmm_map_range(), but targets an arbitrary address
- * space by physical PML4 address rather than the kernel's own. Safe to
- * call regardless of which CR3 is currently loaded -- page tables are
- * always walked through the direct map. */
-void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
-                     uint64_t flags);
-void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
-                      uint64_t size, uint64_t flags);
+// Maps into the address space identified by `pml4_phys`, regardless of the currently loaded CR3.
+void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
+void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags);
 
-/* Unmaps a single page (if one is mapped there -- a no-op otherwise)
- * from the given address space: clears the leaf PTE, invalidates it
- * locally, and frees the physical frame it pointed at back to the
- * PMM. Does NOT reclaim now-possibly-empty intermediate page-table
- * levels (PT/PD/PDPT) -- same "keep it simple" tradeoff
- * vmm_free_user_space() already makes for the whole-address-space
- * case, just not walking back up to check emptiness here. Only a
- * local invlpg, not a full vmm_flush_tlb_all_cpus() shootdown: every
- * caller targets a *user* address space belonging to exactly one
- * task, and a task only ever runs on one CPU at a time, so no other
- * core can have this mapping cached. Callers that unmap kernel-shared
- * mappings (there are none yet) would need the cross-cpu variant
- * instead. */
+// Removes a mapping, invalidates it locally, and frees its physical frame.Empty intermediate page tables are retained.
 void vmm_unmap_page_in(uint64_t pml4_phys, uint64_t virt);
 void vmm_unmap_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t size);
 
-/* Frees every page-table level and every mapped physical page in the
- * *lower* half (user space, PML4 indices 0-255) of the given address
- * space, then frees the PML4 itself. Never touches the shared upper
- * half. Call once a process has exited and nothing references its
- * address space any more (in particular: not the currently loaded
- * CR3 on any CPU). */
+// Frees all lower-half user mappings and page tables, then the PML4 itself.The shared kernel upper half is preserved.
 void vmm_free_user_space(uint64_t pml4_phys);
 
-/* Maps `size` bytes of device MMIO starting at physical address `phys`
- * as uncacheable, into a dedicated virtual window well above the direct
- * map, and returns a usable pointer (already offset to `phys`'s
- * alignment within the page). Never unmapped -- fine for the handful of
- * fixed platform devices (I/O APIC, xAPIC fallback, ...) this exists
- * for. */
+/ Maps a physical MMIO range as uncacheable and returns a pointer to it.MMIO mappings are permanent.
 void *vmm_map_mmio(uint64_t phys, size_t size);
 
-/* Invalidates `virt` (or, if `virt` is 0, the whole TLB) on every online
- * CPU, synchronously. Call after modifying a live mapping that another
- * core might already have cached in its TLB. */
+// Invalidates `virt`, or the entire TLB when `virt` is 0, on all online CPUs.
 void vmm_flush_tlb_all_cpus(uint64_t virt);
 
 #endif /* NEXUS_VMM_H */

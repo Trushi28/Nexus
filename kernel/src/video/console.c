@@ -4,15 +4,11 @@
 #include "video/nx_box8x8.h"
 #include "video/nx_font8x8.h"
 
-/* nx_font8x8.h -- Nexus's own font (see that header for the storage/
- * bit-order convention). Used to be dhepper/font8x8's font8x8_basic.h,
- * fetched at build time; see nx_font8x8.h's own comment for why that
- * got replaced. */
-
 #define GLYPH_W 8
 #define GLYPH_H 8
 #define CELL_W GLYPH_W
-#define CELL_H (GLYPH_H + 2) /* a little vertical breathing room */
+#define CELL_H (GLYPH_H + 2)
+#define ESC 0x1B
 
 static uint32_t cols, rows;
 static uint32_t cur_col, cur_row;
@@ -130,8 +126,7 @@ void console_backspace(void) {
     return;
   }
   cur_col--;
-  fb_fill_rect((uint64_t)cur_col * CELL_W, (uint64_t)cur_row * CELL_H, CELL_W,
-               CELL_H, bg_color);
+  fb_fill_rect((uint64_t)cur_col * CELL_W, (uint64_t)cur_row * CELL_H, CELL_W, CELL_H, bg_color);
 }
 
 uint32_t console_cols(void) { return cols; }
@@ -162,11 +157,59 @@ void console_putc_box_at(uint32_t col, uint32_t row, enum nx_box_glyph g) {
   draw_box_glyph(col, row, g);
 }
 
+static bool try_consume_sgr(const char *s, size_t len, size_t *consumed) {
+  if (len < 3 || s[0] != ESC || s[1] != '[') {
+    return false;
+  }
+
+  size_t i = 2;
+  uint32_t code = 0;
+  bool any_digit = false;
+  while (i < len && s[i] >= '0' && s[i] <= '9') {
+    code = code * 10 + (uint32_t)(s[i] - '0');
+    i++;
+    any_digit = true;
+  }
+  if (i >= len || s[i] != 'm') {
+    return false;
+  }
+  i++;
+  *consumed = i;
+
+  if (!any_digit) {
+    code = 0; /* bare ESC[m -- treat like ESC[0m */
+  }
+
+  switch (code) {
+  case 0:
+    console_set_colors(NX_COLOR_FG, NX_COLOR_BG);
+    break;
+  case 1:
+    console_set_colors(NX_COLOR_ACCENT, NX_COLOR_BG);
+    break;
+  case 2:
+    console_set_colors(NX_COLOR_DIM, NX_COLOR_BG);
+    break;
+  case 31:
+    console_set_colors(NX_COLOR_ERROR, NX_COLOR_BG);
+    break;
+  default:
+    break; /* consumed, but no color this table knows about */
+  }
+  return true;
+}
+
 void console_puts(const char *s) {
   size_t len = strlen(s);
   size_t i = 0;
 
   while (i < len) {
+    size_t sgr_consumed;
+    if (s[i] == ESC && try_consume_sgr(s + i, len - i, &sgr_consumed)) {
+      i += sgr_consumed;
+      continue;
+    }
+
     size_t consumed;
     uint32_t cp = utf8_decode(s + i, len - i, &consumed);
     i += consumed;

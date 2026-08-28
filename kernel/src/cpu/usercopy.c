@@ -26,7 +26,6 @@ bool copy_string_from_user(char *kdst, const void *usrc, size_t max) {
       return true;
     }
   }
-  kdst[max - 1] = '\0'; /* silently truncated, same as the strncpy() call sites
-                           this replaces */
+  kdst[max - 1] = '\0'; /* silently truncated, same as the strncpy() call sites this replaces */
   return true;
 }

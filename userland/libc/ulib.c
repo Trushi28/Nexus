@@ -160,9 +160,7 @@ bool u_ps(unsigned index, nx_task_info_t *out) {
 
 int u_chdir(const char *path) { return (int)SC1(SYS_chdir, path); }
 
-bool u_getcwd(char *buf, size_t max) {
-  return SC2(SYS_getcwd, buf, max) == 0;
-}
+bool u_getcwd(char *buf, size_t max) { return SC2(SYS_getcwd, buf, max) == 0; }
 
 int u_reboot(void) { return (int)SC0(SYS_reboot); }
 
@@ -173,3 +171,8 @@ bool u_sysinfo(nx_sysinfo_t *out) { return SC1(SYS_sysinfo, out) == 0; }
 int u_gsync(void) { return (int)SC0(SYS_gsync); }
 
 int u_gload(void) { return (int)SC0(SYS_gload); }
+
+void u_color_accent(void) { u_print("\x1b[1m"); }
+void u_color_dim(void) { u_print("\x1b[2m"); }
+void u_color_error(void) { u_print("\x1b[31m"); }
+void u_color_reset(void) { u_print("\x1b[0m"); }

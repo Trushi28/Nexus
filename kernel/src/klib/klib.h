@@ -1,12 +1,8 @@
 #ifndef NEXUS_KLIB_H
 #define NEXUS_KLIB_H
 
-/*
- * Common kernel-wide includes and helper macros. <stdint.h>, <stddef.h>,
- * <stdbool.h> and <stdarg.h> are all part of the "freestanding" subset of
- * the C standard library that the compiler itself provides (no libc
- * needed) -- see C11 4/6.
- */
+/* Common kernel-wide includes and helper macros. The headers below are
+ * available in a freestanding C environment without requiring libc. */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -31,14 +27,13 @@
 
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 
-#define container_of(ptr, type, member) \
-    ((type *)((uint8_t *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((uint8_t *)(ptr) - offsetof(type, member)))
 
-/* klib/string.c -- freestanding mem-family / str-family helpers. The
- * compiler is legally allowed to emit calls to memcpy/memset/memmove/
- * memcmp on its own even in -ffreestanding mode (e.g. for struct
- * assignment or array init), so these must exist with exactly these
- * names no matter what. */
+/*
+ * Freestanding string and memory helpers. The compiler may emit calls to
+ * these functions even in freestanding mode, so they must exist with their
+ * standard names.
+ */
 void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
 void *memmove(void *dest, const void *src, size_t n);
@@ -54,7 +49,7 @@ const char *strstr(const char *haystack, const char *needle);
 bool   str_has_prefix(const char *s, const char *prefix);
 bool   str_has_suffix(const char *s, const char *suffix);
 
-/* klib/printf.c */
+
 int kvsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 int ksnprintf(char *buf, size_t size, const char *fmt, ...);
 

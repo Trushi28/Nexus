@@ -50,13 +50,13 @@ struct nsh_synonym {
 };
 
 static const struct nsh_synonym synonyms[] = {
-    {"list", "ls"},        {"dir", "ls"},        {"type", "cat"},
-    {"read", "cat"},       {"spawn", "run"},     {"start", "run"},
-    {"tasks", "ps"},       {"procs", "ps"},      {"who", "ps"},
-    {"say", "echo"},       {"quit", "exit"},     {"logout", "exit"},
-    {"mem", "meminfo"},    {"free", "meminfo"},  {"cpu", "cpuinfo"},
-    {"poweroff", "shutdown"}, {"halt", "shutdown"},
-    {"save", "gsync"},     {"load", "gload"},
+    {"list", "ls"},           {"dir", "ls"},        {"type", "cat"},
+    {"read", "cat"},          {"spawn", "run"},     {"start", "run"},
+    {"tasks", "ps"},          {"procs", "ps"},      {"who", "ps"},
+    {"say", "echo"},          {"quit", "exit"},     {"logout", "exit"},
+    {"mem", "meminfo"},       {"free", "meminfo"},  {"cpu", "cpuinfo"},
+    {"poweroff", "shutdown"}, {"halt", "shutdown"}, {"save", "gsync"},
+    {"load", "gload"},
 };
 
 static struct nsh_command commands[] = {
@@ -88,8 +88,7 @@ static struct nsh_command commands[] = {
      "save if dirty, then power off (ACPI, falling back as needed). "
      "Root only",
      0},
-    {"gsync", cmd_gsync, "", "save the graph filesystem to disk. Root only",
-     0},
+    {"gsync", cmd_gsync, "", "save the graph filesystem to disk. Root only", 0},
     {"gload", cmd_gload, "",
      "reload the graph filesystem from disk (only if empty). Root only", 0},
     {"topcmds", cmd_topcmds, "", "your most-used commands this session", 0},
@@ -101,6 +100,12 @@ static const char *skip_spaces(const char *s) {
     s++;
   }
   return s;
+}
+
+static void print_error(const char *msg) {
+  u_color_error();
+  u_print(msg);
+  u_color_reset();
 }
 
 static const char *normalize_verb(const char *verb, char *scratch,
@@ -356,7 +361,7 @@ static void cmd_ls(const char *args) {
 static void cmd_cd(const char *args) {
   const char *target = (*args == '\0') ? "/" : args;
   if (u_chdir(target) < 0) {
-    u_print("cd: no such directory\n");
+    print_error("cd: no such directory\n");
   }
 }
 
@@ -367,7 +372,7 @@ static void cmd_cat(const char *args) {
   }
   int fd = u_open(args, O_RDONLY);
   if (fd < 0) {
-    u_print("cat: no such file\n");
+    print_error("cat: no such file\n");
     return;
   }
   char buf[129];
@@ -394,7 +399,7 @@ static void cmd_run(const char *args) {
 
   int pid = u_spawn(pathbuf);
   if (pid < 0) {
-    u_print("run: couldn't spawn '");
+    print_error("run: couldn't spawn '");
     u_print(pathbuf);
     u_print("'\n");
     return;
@@ -420,8 +425,8 @@ static void cmd_run(const char *args) {
     }
   }
   if (slot < 0) {
-    u_print("run: job table full -- see 'jobs', or wait for one to "
-            "finish\n");
+    print_error("run: job table full -- see 'jobs', or wait for one to "
+                "finish\n");
     return;
   }
 
@@ -449,7 +454,7 @@ static void cmd_exec(const char *args) {
   u_exec(args);
   /* Only reaches here if exec() failed -- on success this shell's own
    * image has already been replaced and control never returns here. */
-  u_print("exec: couldn't exec '");
+  print_error("exec: couldn't exec '");
   u_print(args);
   u_print("'\n");
 }
@@ -475,7 +480,7 @@ static void cmd_jobs(const char *args) {
     any = true;
   }
   if (!any) {
-    u_print("(no background jobs)\n");
+    print_error("(no background jobs)\n");
   }
 }
 
@@ -486,7 +491,7 @@ static void cmd_kill(const char *args) {
   }
   int pid = u_atoi(args);
   if (u_kill(pid) < 0) {
-    u_print("kill: no such ring-3 task\n");
+    print_error("kill: no such ring-3 task\n");
     return;
   }
   u_print("kill: signalled -- exits at its next syscall\n");
@@ -510,7 +515,7 @@ static void cmd_meminfo(const char *args) {
   (void)args;
   nx_sysinfo_t info;
   if (!u_sysinfo(&info)) {
-    u_print("meminfo: couldn't read system info\n");
+    print_error("meminfo: couldn't read system info\n");
     return;
   }
   u_print("physical: ");
@@ -529,7 +534,7 @@ static void cmd_cpuinfo(const char *args) {
   (void)args;
   nx_sysinfo_t info;
   if (!u_sysinfo(&info)) {
-    u_print("cpuinfo: couldn't read system info\n");
+    print_error("cpuinfo: couldn't read system info\n");
     return;
   }
   char buf[16];
@@ -546,21 +551,21 @@ static void cmd_reboot(const char *args) {
   (void)args;
   u_print("rebooting...\n");
   u_reboot();
-  u_print("reboot: refused -- root only (see 'whoami'/'drop')\n");
+  print_error("reboot: refused -- root only (see 'whoami'/'drop')\n");
 }
 
 static void cmd_shutdown(const char *args) {
   (void)args;
   u_print("shutting down...\n");
   u_shutdown();
-  u_print("shutdown: refused -- root only (see 'whoami'/'drop')\n");
+  print_error("shutdown: refused -- root only (see 'whoami'/'drop')\n");
 }
 
 static void cmd_gsync(const char *args) {
   (void)args;
   if (u_gsync() < 0) {
-    u_print("gsync: failed -- no block device, not root, or nothing to "
-            "save to\n");
+    print_error("gsync: failed -- no block device, not root, or nothing to "
+                "save to\n");
     return;
   }
   u_print("graph saved\n");
@@ -569,8 +574,8 @@ static void cmd_gsync(const char *args) {
 static void cmd_gload(const char *args) {
   (void)args;
   if (u_gload() < 0) {
-    u_print("gload: failed -- no saved graph, not root, or the graph "
-            "isn't empty (gload only ever loads into an empty graph)\n");
+    print_error("gload: failed -- no saved graph, not root, or the graph "
+                "isn't empty (gload only ever loads into an empty graph)\n");
     return;
   }
   u_print("graph loaded\n");
@@ -592,8 +597,8 @@ static void cmd_drop(const char *args) {
   }
   unsigned target = (unsigned)u_atoi(args);
   if (u_setuid(target) < 0) {
-    u_print("drop: refused -- only uid 0 may drop, and only downward "
-            "(see 'whoami')\n");
+    print_error("drop: refused -- only uid 0 may drop, and only downward "
+                "(see 'whoami')\n");
     return;
   }
   char buf[16];
@@ -677,21 +682,46 @@ static void dispatch(char *line) {
     }
   }
 
+  u_color_error();
   u_print("unknown command: ");
   u_print(start);
   u_print(" (try 'help')\n");
+  u_color_reset();
   suggest_commands(start);
 }
 
-/* ------------------------------- banner / prompt --------------------------
- * A plain-ASCII counterpart to the kernel shell's Unicode box-drawn
- * banner (shell/shell.c's print_box_line()/print_box_border_top()) --
- * nsh has no framebuffer/console access at all, only u_print() over a
- * syscall, so there's no color and no box-drawing glyphs available
- * here, just '+'/'-'/'|'. u_print_left() (ulib.h) does the same
- * pad-to-width job shell.c's print_left() does kernel-side, so every
- * row still lines up regardless of how long its text is. */
+// ------------------------------- banner / prompt --------------------------
 #define BANNER_WIDTH 62
+
+static void banner_rule_top(void) {
+  u_color_accent();
+  u_print("\xE2\x95\x94"); /* U+2554 ╔ */
+  for (int i = 0; i < BANNER_WIDTH; i++) {
+    u_print("\xE2\x95\x90"); /* U+2550 ═ */
+  }
+  u_print("\xE2\x95\x97\n"); /* U+2557 ╗ */
+  u_color_reset();
+}
+
+static void banner_rule_bottom(void) {
+  u_color_accent();
+  u_print("\xE2\x95\x9A"); /* U+255A ╚ */
+  for (int i = 0; i < BANNER_WIDTH; i++) {
+    u_print("\xE2\x95\x90"); /* U+2550 ═ */
+  }
+  u_print("\xE2\x95\x9D\n"); /* U+255D ╝ */
+  u_color_reset();
+}
+
+static void banner_line(const char *text) {
+  u_color_accent();
+  u_print("\xE2\x95\x91 "); /* U+2551 ║ */
+  u_color_reset();
+  u_print_left(text, BANNER_WIDTH - 2);
+  u_color_accent();
+  u_print(" \xE2\x95\x91\n");
+  u_color_reset();
+}
 
 static void banner_rule(void) {
   u_putc('+');
@@ -702,18 +732,12 @@ static void banner_rule(void) {
   u_putc('\n');
 }
 
-static void banner_line(const char *text) {
-  u_print("| ");
-  u_print_left(text, BANNER_WIDTH - 2);
-  u_print(" |\n");
-}
-
 static void print_banner(void) {
-  banner_rule();
+  banner_rule_top();
   banner_line("NEXUS -- nsh, the default ring-3 shell");
   banner_line("type 'help' for commands, 'exit' to leave");
   banner_line("need lspci / loom / native graph admin? boot with 'kshell'");
-  banner_rule();
+  banner_rule_bottom();
 
   nx_sysinfo_t info;
   if (u_sysinfo(&info)) {

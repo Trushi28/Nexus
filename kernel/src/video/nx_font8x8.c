@@ -1,13 +1,10 @@
 #include "video/nx_font8x8.h"
 
-/* One row of comment above each printable glyph shows the exact bit
- * pattern it encodes (# = pixel on), so a future edit can eyeball a
- * row against its intended shape without decoding hex by hand -- the
- * same reasoning nx_font8x8.h documents for the bit order itself.
- * Control codes (0x00-0x1F, 0x7F) are all blank: nothing in this
- * kernel ever asks to draw one (console_putc() intercepts \n \r \t \b
- * before a glyph lookup ever happens -- see video/console.c), so a
- * blank cell is a safe, harmless fallback rather than "undefined". */
+/*
+ * Row comments visualize each bitmap (# = pixel on).
+ * Control characters and DEL are blank glyphs.
+ */
+
 const uint8_t nx_font8x8[128][8] = {
     [0x20] = { /* ' ' */
         /* ........ */ 0x00,
@@ -962,4 +959,3 @@ const uint8_t nx_font8x8[128][8] = {
     /* every other index (0x00-0x1F control codes, and 0x7F DEL) is left
      * at its zero-initialised default -- an all-blank glyph. */
 };
-

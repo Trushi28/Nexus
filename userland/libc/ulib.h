@@ -101,8 +101,8 @@ bool u_ps(unsigned index, nx_task_info_t *out);
  * copies the current cwd out to `buf`; false (not just a truncated
  * result) if `buf` is too small -- see sys_getcwd_impl()'s own
  * comment for why that's a hard refusal, not a silent truncation. */
-int u_chdir(const char *path);              /* -> 0, or -1 */
-bool u_getcwd(char *buf, size_t max);        /* -> true and fills buf, or false */
+int u_chdir(const char *path);        /* -> 0, or -1 */
+bool u_getcwd(char *buf, size_t max); /* -> true and fills buf, or false */
 
 /* Power control -- root-only (see 'whoami'/'drop'). Both never return
  * on success; the machine is rebooting/off by the time control would
@@ -123,5 +123,9 @@ bool u_sysinfo(nx_sysinfo_t *out);
  * error detail beyond the 0/-1 result. */
 int u_gsync(void); /* -> 0, or -1 */
 int u_gload(void); /* -> 0, or -1 */
+void u_color_accent(void);
+void u_color_dim(void);
+void u_color_error(void);
+void u_color_reset(void);
 
 #endif /* NEXUS_ULIB_H */

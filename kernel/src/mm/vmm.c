@@ -31,25 +31,18 @@ static uint64_t *table_get_or_create(uint64_t *table, size_t index) {
     return (uint64_t *)phys_to_virt(table[index] & ADDR_MASK);
   }
 
-  uint64_t new_phys = pmm_alloc_page(); /* pmm hands back zeroed frames */
+  uint64_t new_phys = pmm_alloc_page(); // pmm hands back zeroed frames
   if (new_phys == 0) {
     panic("vmm: out of memory allocating a page table");
   }
 
-  /* Intermediate entries are deliberately permissive (present+writable+user);
-   * the leaf PTE is what actually enforces read-only/NX/supervisor. */
+  // Intermediate entries are deliberately permissive (present+writable+user);the leaf PTE is what actually enforces read-only/NX/supervisor.
   table[index] = new_phys | VMM_PRESENT | VMM_WRITABLE | VMM_USER;
 
   return (uint64_t *)phys_to_virt(new_phys);
 }
 
-/* Shared worker behind every vmm_map_page*() variant -- `pml4v` is the
- * HHDM-mapped virtual pointer to whichever PML4 (kernel's own, or a
- * process's) is being modified. table_get_or_create() is already
- * pml4-agnostic (it just walks whatever `table` it's handed), so this
- * is the only place that needed to grow a parameter. */
-static void map_page_in(uint64_t *pml4v, uint64_t virt, uint64_t phys,
-                        uint64_t flags) {
+static void map_page_in(uint64_t *pml4v, uint64_t virt, uint64_t phys, uint64_t flags) {
   size_t pml4_i = (virt >> 39) & 0x1FF;
   size_t pdpt_i = (virt >> 30) & 0x1FF;
   size_t pd_i = (virt >> 21) & 0x1FF;
@@ -66,8 +59,7 @@ static void map_page_in(uint64_t *pml4v, uint64_t virt, uint64_t phys,
   spinlock_release_irqrestore(&vmm_lock, f);
 }
 
-static void map_range_in(uint64_t *pml4v, uint64_t virt, uint64_t phys,
-                         uint64_t size, uint64_t flags) {
+static void map_range_in(uint64_t *pml4v, uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
   uint64_t start = ALIGN_DOWN(virt, PAGE_SIZE);
   uint64_t end = ALIGN_UP(virt + size, PAGE_SIZE);
   uint64_t off = 0;
@@ -81,26 +73,19 @@ void vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
   map_page_in(pml4_virt, virt, phys, flags);
 }
 
-void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size,
-                   uint64_t flags) {
+void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
   map_range_in(pml4_virt, virt, phys, size, flags);
 }
 
-void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
-                     uint64_t flags) {
+void vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags) {
   map_page_in((uint64_t *)phys_to_virt(pml4_phys), virt, phys, flags);
 }
 
-void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
-                      uint64_t size, uint64_t flags) {
+void vmm_map_range_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t size, uint64_t flags) {
   map_range_in((uint64_t *)phys_to_virt(pml4_phys), virt, phys, size, flags);
 }
 
-/* Walks to the leaf PT for `table[index]`, returning false (without
- * creating anything) if any intermediate level isn't present -- the
- * read-only counterpart to table_get_or_create() above, for the
- * unmap path, which must never populate a table that a real mapping
- * never touched. */
+/* Looks up an existing next-level table without creating one. */
 static bool table_lookup(uint64_t *table, size_t index, uint64_t **out) {
   if (!(table[index] & VMM_PRESENT)) {
     return false;
@@ -109,8 +94,6 @@ static bool table_lookup(uint64_t *table, size_t index, uint64_t **out) {
   return true;
 }
 
-/* Shared worker behind vmm_unmap_page_in()/vmm_unmap_range_in() --
- * see vmm.h's comment on both for the locking/TLB reasoning. */
 static void unmap_page_in(uint64_t *pml4v, uint64_t virt) {
   size_t pml4_i = (virt >> 39) & 0x1FF;
   size_t pdpt_i = (virt >> 30) & 0x1FF;
@@ -160,16 +143,8 @@ uint64_t vmm_new_address_space(void) {
   }
   uint64_t *table = (uint64_t *)phys_to_virt(phys);
 
-  /* Share the kernel's upper-half mapping (direct map, kernel image,
-   * MMIO window -- everything vmm_init() built) by copying its
-   * top-level PML4 entries wholesale. Cheap (256 qwords) and correct:
-   * each copied entry just points at an existing shared sub-table, so
-   * any later change *within* an already-shared subtree (e.g. a new
-   * MMIO window carved out of the existing region) is automatically
-   * visible here too. The one gap: a brand new top-level PML4 slot
-   * (a fresh 512GiB-aligned region) populated by the kernel *after*
-   * this address space was created would not be -- doesn't happen for
-   * Nexus's fixed set of kernel regions, but worth knowing. */
+  /* Share the kernel's upper-half mappings. User mappings occupy the lower
+   * half and remain private to each address space. */
   uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
   for (size_t i = 256; i < ENTRIES_PER_TABLE; i++) {
     table[i] = pml4_virt[i];
@@ -180,12 +155,8 @@ uint64_t vmm_new_address_space(void) {
 }
 
 void vmm_free_user_space(uint64_t pml4_phys) {
-  /* No TLB shootdown needed here: by the time this runs, the caller
-   * has guaranteed the address space isn't the currently loaded CR3 on
-   * any CPU (see the callers), and without PCID (never enabled here),
-   * every CR3 write already flushes the whole TLB -- so whatever
-   * stale entries this address space may have left behind were wiped
-   * out the moment any CPU switched away from it. */
+    /* The caller guarantees this address space is inactive on every CPU, so
+     * no TLB shootdown is required before freeing it. */
   uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
   for (size_t i = 0; i < 256; i++) {
@@ -254,14 +225,7 @@ uint64_t vmm_copy_address_space(uint64_t src_pml4_phys) {
           }
 
           uint64_t src_phys = entry & ADDR_MASK;
-          /* Everything outside the physical-address field -- present,
-           * writable, user, PWT/PCD, NX -- carries over unchanged.
-           * Intermediate PDPT/PD/PT entries don't need this same
-           * treatment: table_get_or_create() (used internally by
-           * vmm_map_page_in() below) always builds them with the same
-           * fixed permissive flags every OTHER address space in this
-           * kernel already uses, since the leaf PTE is what actually
-           * enforces permissions -- see that function's own comment. */
+          /* Preserve the source leaf PTE flags. */
           uint64_t flags = entry & ~ADDR_MASK;
 
           uint64_t new_phys = pmm_alloc_page();
@@ -271,8 +235,7 @@ uint64_t vmm_copy_address_space(uint64_t src_pml4_phys) {
           }
           memcpy(phys_to_virt(new_phys), phys_to_virt(src_phys), PAGE_SIZE);
 
-          uint64_t va = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
-                        ((uint64_t)k << 21) | ((uint64_t)l << 12);
+          uint64_t va = ((uint64_t)i << 39) | ((uint64_t)j << 30) | ((uint64_t)k << 21) | ((uint64_t)l << 12);
           vmm_map_page_in(dst_pml4_phys, va, new_phys, flags);
         }
       }
@@ -296,9 +259,8 @@ void vmm_init(void) {
   }
   pml4_virt = (uint64_t *)phys_to_virt(pml4_phys_addr);
 
-  /* Direct map: only map the specific physical regions reported by Limine.
-   * Blindly mapping 0 to highest exhausts memory by allocating page tables
-   * for massive void gaps (e.g. 1 TiB QEMU boundaries). */
+  /* Map only physical regions reported by the boot memory map. Mapping every
+   * address up to the highest physical address can waste page tables on gaps. */
   struct limine_memmap_response *mm = g_boot.memmap;
   for (uint64_t i = 0; i < mm->entry_count; i++) {
     struct limine_memmap_entry *e = mm->entries[i];
@@ -306,19 +268,16 @@ void vmm_init(void) {
     uint64_t base = ALIGN_DOWN(e->base, PAGE_SIZE);
     uint64_t length = ALIGN_UP(e->length + (e->base - base), PAGE_SIZE);
 
-    vmm_map_range(g_boot.hhdm_offset + base, base, length,
-                  VMM_WRITABLE | VMM_NX);
+    vmm_map_range(g_boot.hhdm_offset + base, base, length, VMM_WRITABLE | VMM_NX);
   }
 
   /* The kernel image itself, W^X, matching linker.ld's layout. */
   map_kernel_section((uint64_t)__text_start, (uint64_t)__text_end, 0);
   map_kernel_section((uint64_t)__rodata_start, (uint64_t)__rodata_end, VMM_NX);
-  map_kernel_section((uint64_t)__data_start, (uint64_t)__bss_end,
-                     VMM_WRITABLE | VMM_NX);
+  map_kernel_section((uint64_t)__data_start, (uint64_t)__bss_end, VMM_WRITABLE | VMM_NX);
 
   /* Reserve a virtual window for MMIO mappings */
-  mmio_next_virt = ALIGN_UP(g_boot.hhdm_offset + pmm_total_bytes(),
-                            0x40000000ULL /* 1GiB */);
+  mmio_next_virt = ALIGN_UP(g_boot.hhdm_offset + pmm_total_bytes(), 0x40000000ULL /* 1GiB */);
 
   register_interrupt_handler(VEC_TLB_SHOOTDOWN_IPI, tlb_shootdown_handler);
 

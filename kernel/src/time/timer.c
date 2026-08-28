@@ -38,7 +38,7 @@ void timer_calibrate(void) {
     apic_ticks_per_ms = elapsed / window_ms;
 
     if (apic_ticks_per_ms == 0) {
-        apic_ticks_per_ms = 1; /* pathological/virtualised timer; keep going anyway */
+        apic_ticks_per_ms = 1;
     }
 
     kprintf("[timer] LAPIC timer calibrated: %u ticks/ms (divide-by-16)\n",

@@ -23,22 +23,13 @@
 #include "time/timer.h"
 #include "video/console.h"
 /*
- * The syscall ABI: `int $0x80`, number in rax, args in rdi/rsi/rdx/r10/
- * r8, return value in rax. isr_stubs.S has already pushed every GPR
- * into `frame` by the time syscall_dispatch() runs (see cpu/isr.c), so
- * this is just an ordinary registered VEC_SYSCALL handler -- no new
- * assembly needed anywhere, only the DPL=3 IDT gate set up in
- * cpu/idt.c.
+ * Syscall ABI: `int $0x80`, number in rax, arguments in
+ * rdi/rsi/rdx/r10/r8, return value in rax.
  *
- * Every syscall that touches a user-supplied pointer goes through
- * user_range_ok() first (rejects NULL-page and kernel-half pointers
- * outright) and then copy_from_user()/copy_to_user()/
- * copy_string_from_user() (cpu/usercopy.h) for the actual access. Those
- * survive a syntactically-valid-but-unmapped pointer: the one risky
- * instruction inside each is wrapped in a small exception table
- * cpu/isr.c's page-fault path consults, so a bad pointer now fails the
- * syscall instead of taking the whole kernel down with an unhandled
- * #PF. See cpu/usercopy.S for exactly how.*/
+ * User pointers are validated with user_range_ok() and accessed through
+ * the fault-safe usercopy helpers.
+ */
+
 static bool user_range_ok(uint64_t addr, uint64_t len) {
   if (len == 0) {
     return true;
@@ -83,7 +74,7 @@ static void sys_write_impl(struct interrupt_frame *f) {
   }
 
   if (fd == STDOUT_FILENO || fd == STDERR_FILENO) {
-    char chunk[128];
+    char chunk[512];
     uint64_t done = 0;
     while (done < len) {
       uint64_t n = MIN(len - done, sizeof(chunk) - 1);
@@ -261,18 +252,7 @@ static void sys_getuid_impl(struct interrupt_frame *f) {
   f->rax = this_cpu()->current_task->uid;
 }
 
-/* Root-only, one-way privilege drop -- see abi/syscall_nr.h's
- * SYS_setuid comment for why this is deliberately simpler than a real
- * setuid()/seteuid()/setresuid() triad: Nexus has no user database,
- * no login, no concept of "which uids are allowed to become which
- * other uids" beyond "uid 0 can become anything, nothing else can
- * become anything at all." A process that drops its own privilege
- * this way can never get it back -- there's no saved-uid to restore
- * from -- which is exactly the point: the intended use is a
- * root-launched process voluntarily narrowing itself (see nsh's
- * `drop` command) right before doing something it doesn't want to
- * fully trust itself with, not a general identity-switching
- * mechanism. */
+// Root-only uid change; dropped privileges cannot be regained.
 static void sys_setuid_impl(struct interrupt_frame *f) {
   struct task *caller = this_cpu()->current_task;
   uint32_t requested = (uint32_t)f->rdi;
@@ -285,17 +265,12 @@ static void sys_setuid_impl(struct interrupt_frame *f) {
   f->rax = 0;
 }
 
-/* Resolves `path` against the caller's OWN cwd (vfs_resolve_relative())
- * and, if it names a real directory, commits the resolved (absolute,
- * normalized) result as the caller's new cwd -- same verify-before-
- * commit shape as shell/shell.c's own cmd_cd(), which this mirrors
- * exactly, just per-task instead of per-shell-instance now. */
+// Resolves `path` against the caller's cwd and updates it if it is a directory.
 static void sys_chdir_impl(struct interrupt_frame *f) {
   uint64_t path_va = f->rdi;
 
   char path[256];
-  if (!user_range_ok(path_va, 1) ||
-      !copy_string_from_user(path, (const void *)path_va, sizeof(path))) {
+  if (!user_range_ok(path_va, 1) ||!copy_string_from_user(path, (const void *)path_va, sizeof(path))) {
     f->rax = (uint64_t)-1;
     return;
   }
@@ -315,12 +290,7 @@ static void sys_chdir_impl(struct interrupt_frame *f) {
   f->rax = 0;
 }
 
-/* Copies the caller's own cwd out to `buf` (capacity `len`). Refuses
- * outright rather than silently truncating if `buf` is too small --
- * unlike SYS_readdir's name_out (where a truncated directory ENTRY
- * name is merely cosmetic), a truncated PATH handed back to a caller
- * that's about to cd into or display it is exactly the kind of subtle
- * wrong-directory bug worth failing loudly on instead. */
+// Copies the caller's cwd to `buf`; fails if the buffer is too small.
 static void sys_getcwd_impl(struct interrupt_frame *f) {
   uint64_t buf_va = f->rdi;
   uint64_t len = f->rsi;
@@ -343,13 +313,7 @@ static void sys_getcwd_impl(struct interrupt_frame *f) {
   f->rax = 0;
 }
 
-/* SYS_reboot/SYS_shutdown -- root-only, same reasoning as SYS_setuid:
- * this affects the WHOLE machine, not just the calling process, so a
- * restricted task (see nsh's `drop`) can't trigger it just by knowing
- * the syscall exists. power_reboot()/power_shutdown() (init/power.c)
- * never return on success -- the exact same functions shell/shell.c's
- * `reboot`/`shutdown` commands call, so a ring-3 `reboot`/`shutdown`
- * (nsh) and the kernel shell's own do byte-for-byte the same thing. */
+// Root-only: affects the whole machine.
 static void sys_reboot_impl(struct interrupt_frame *f) {
   struct task *caller = this_cpu()->current_task;
   if (caller->uid != 0) {
@@ -368,10 +332,7 @@ static void sys_shutdown_impl(struct interrupt_frame *f) {
   power_shutdown(); /* never returns */
 }
 
-/* A flat, read-only snapshot of a handful of system facts (abi/
- * sysinfo.h's nx_sysinfo_t) -- everything nsh's `meminfo`/`cpuinfo`
- * need, in one syscall instead of several, and available to any uid
- * (purely informational, nothing here is sensitive). */
+// Returns a read-only snapshot of system information.
 static void sys_sysinfo_impl(struct interrupt_frame *f) {
   uint64_t out_va = f->rdi;
   if (!user_range_ok(out_va, sizeof(nx_sysinfo_t))) {
@@ -395,13 +356,7 @@ static void sys_sysinfo_impl(struct interrupt_frame *f) {
   f->rax = 0;
 }
 
-/* SYS_gsync/SYS_gload -- root-only, same reasoning as SYS_reboot/
- * SYS_shutdown: the graph is shared, system-wide, persisted state,
- * not something scoped to the calling process, so triggering a save
- * or a reload of it is gated the same way. Straight passthroughs to
- * fs/graph.c's own functions, which already log their own outcome --
- * see cmd_gsync()/cmd_gload() in shell/shell.c for the identical
- * kernel-shell equivalent. */
+// Root-only: the persisted graph is shared system-wide state.
 static void sys_gsync_impl(struct interrupt_frame *f) {
   struct task *caller = this_cpu()->current_task;
   if (caller->uid != 0) {
@@ -462,8 +417,7 @@ static void sys_brk_impl(struct interrupt_frame *f) {
         f->rax = t->brk;
         return;
       }
-      vmm_map_page_in(t->cr3_phys, va, phys,
-                      VMM_PRESENT | VMM_WRITABLE | VMM_USER | VMM_NX);
+      vmm_map_page_in(t->cr3_phys, va, phys, VMM_PRESENT | VMM_WRITABLE | VMM_USER | VMM_NX);
       t->brk = va + PAGE_SIZE;
     }
   } else if (new_top < old_top) {
@@ -481,15 +435,13 @@ static void sys_readdir_impl(struct interrupt_frame *f) {
   uint64_t out_len = f->r10;
 
   char path[256];
-  if (!user_range_ok(path_va, 1) || !user_range_ok(out_va, out_len) ||
-      !copy_string_from_user(path, (const void *)path_va, sizeof(path))) {
+  if (!user_range_ok(path_va, 1) || !user_range_ok(out_va, out_len) || !copy_string_from_user(path, (const void *)path_va, sizeof(path))) {
     f->rax = (uint64_t)-1;
     return;
   }
 
   char resolved[256];
-  vfs_resolve_relative(this_cpu()->current_task->cwd, path, resolved,
-                       sizeof(resolved));
+  vfs_resolve_relative(this_cpu()->current_task->cwd, path, resolved, sizeof(resolved));
 
   char name[64];
   if (!vfs_readdir(resolved, index, name, sizeof(name))) {
@@ -521,12 +473,7 @@ static void sys_spawn_impl(struct interrupt_frame *f) {
     return;
   }
 
-  /* Same default an ordinary fork/exec makes: a spawned child
-   * inherits the SPAWNING task's own clearance, not root's --
-   * credentials only ever change via an explicit sys_setuid_impl()
-   * call, or the kernel shell's own `runas`, which calls
-   * process_spawn() directly with an explicit uid instead of going
-   * through this syscall at all (see shell/shell.c's cmd_runas()). */
+  // Spawned tasks inherit the caller's uid.
   struct task *caller = this_cpu()->current_task;
 
   char resolved[256];
@@ -598,9 +545,7 @@ static void sys_exec_impl(struct interrupt_frame *f) {
     vmm_map_page_in(new_pml4, va, phys, VMM_WRITABLE | VMM_USER | VMM_NX);
   }
 
-  /* Note: exec() does NOT touch uid, and does NOT touch cwd either --
-   * both belong to the process, not the image, exactly like a real
-   * exec() with no setuid bit and no chdir side effect involved. */
+  // exec() replaces the image without changing uid or cwd.
   uint64_t old_pml4 = t->cr3_phys;
 
   write_cr3(new_pml4);
@@ -635,17 +580,7 @@ static void sys_split_impl(struct interrupt_frame *f) {
     return;
   }
 
-  struct task *child =
-      task_create_user(parent->name, new_pml4, trampoline_va, USER_STACK_TOP,
-                       arg, entry_va, parent->uid); /* split()'s child
-                                                        inherits the
-                                                        SAME clearance
-                                                        as the parent --
-                                                        it's still the
-                                                        same logical
-                                                        process, just a
-                                                        second thread of
-                                                        control */
+  struct task *child = task_create_user(parent->name, new_pml4, trampoline_va, USER_STACK_TOP, arg, entry_va, parent->uid);// exec() replaces the image without changing uid or cwd.
   if (child == NULL) {
     vmm_free_user_space(new_pml4);
     f->rax = (uint64_t)-1;
@@ -657,16 +592,13 @@ static void sys_split_impl(struct interrupt_frame *f) {
   child->parent = parent;
   strncpy(child->cwd, parent->cwd, sizeof(child->cwd) - 1);
   child->cwd[sizeof(child->cwd) - 1] = '\0';
-  ksnprintf(child->name, sizeof(child->name), "%s~%lu", parent->name,
-            child->id);
+  ksnprintf(child->name, sizeof(child->name), "%s~%lu", parent->name, child->id);
 
   for (int i = 0; i < PROC_MAX_FDS; i++) {
     if (parent->fds[i] != NULL) {
       child->fds[i] = vfs_dup(parent->fds[i]);
       if (child->fds[i] == NULL) {
-        kprintf("[split] pid %lu: couldn't duplicate fd %d into new pid "
-                "%lu -- that fd starts closed there\n",
-                parent->id, i, child->id);
+        kprintf("[split] pid %lu: couldn't duplicate fd %d into new pid %lu -- that fd starts closed there\n", parent->id, i, child->id);
       }
     }
   }
@@ -711,14 +643,10 @@ static void sys_wait_any_impl(struct interrupt_frame *f) {
   f->rax = (uint64_t)pid;
 }
 
-/* kill() now enforces the same clearance boundary as every other
- * cross-task operation added this turn: root (uid 0) may signal
- * anything; anyone else may only signal a task with their OWN uid.
- * sched_find_waitable_task() already refuses anything that isn't
- * "waitable" (kernel tasks -- the shell, gautosave, blockdev init --
- * never are, see task_create()), so this closes the remaining gap:
- * two DIFFERENT ring-3 processes could previously kill() each other
- * freely just by knowing a pid, with no ownership concept at all. */
+/*
+ * Root may kill any waitable task; non-root tasks may only kill tasks
+ * with the same uid.
+ */
 static void sys_kill_impl(struct interrupt_frame *f) {
   uint64_t pid = f->rdi;
 
@@ -730,11 +658,7 @@ static void sys_kill_impl(struct interrupt_frame *f) {
 
   struct task *caller = this_cpu()->current_task;
   if (caller->uid != 0 && caller->uid != t->uid) {
-    /* Same -1 a nonexistent pid gets -- this ABI has no errno, so
-     * there's no clean way to distinguish "no such task" from "not
-     * yours" anyway, and not distinguishing them means a restricted
-     * process can't use kill() to probe which pids exist elsewhere
-     * in the system. */
+    // Hide permission failures to avoid leaking task existence.
     f->rax = (uint64_t)-1;
     return;
   }
@@ -753,8 +677,7 @@ struct ps_lookup_ctx {
 static void ps_lookup_one(struct task *t, void *arg) {
   struct ps_lookup_ctx *ctx = (struct ps_lookup_ctx *)arg;
   if (ctx->found) {
-    return; /* sched_for_each_task() has no early-exit -- just skip
-                the rest of the walk once we've found our target */
+    return; // No early exit support; skip work after finding the target.
   }
   if (ctx->seen == ctx->target_index) {
     ctx->info.pid = t->id;

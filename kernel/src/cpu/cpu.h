@@ -26,8 +26,7 @@ struct cpu_local {
   struct task *pending_exit;
   struct task *parked_head;
   uint64_t tick_count; /* incremented on every local timer interrupt */
-  uint32_t
-      quantum_ticks; /* scheduler: ticks since this CPU's last reschedule */
+  uint32_t quantum_ticks; /* scheduler: ticks since this CPU's last reschedule */
 
   uint64_t sched_stack_top;
 };
@@ -43,8 +42,7 @@ static inline struct cpu_local *this_cpu(void) {
 
 void cpu_enable_nx(void);
 
-struct cpu_local *cpu_local_create(uint32_t cpu_index, uint32_t lapic_id,
-                                   uint32_t processor_id, bool is_bsp);
+struct cpu_local *cpu_local_create(uint32_t cpu_index, uint32_t lapic_id, uint32_t processor_id, bool is_bsp);
 
 void cpu_setup_current(struct cpu_local *cpu);
 

@@ -3,9 +3,7 @@
 
 #include "klib/klib.h"
 
-/* Seeds the heap with an initial chunk of pages. Call once, after the
- * PMM and VMM are both up (allocations are served straight out of the
- * direct map, so no dedicated VMM region is needed). */
+// Initializes the kernel heap. Call after PMM and VMM initialization.
 void heap_init(void);
 
 void *kmalloc(size_t size);

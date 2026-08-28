@@ -5,11 +5,11 @@
 #include "sync/spinlock.h"
 #include <limine.h>
 
-static uint64_t *bitmap; /* 1 bit per page; 1 = used, 0 = free */
+static uint64_t *bitmap; // 1 = allocated/reserved, 0 = free
 static uint64_t bitmap_words;
 static uint64_t total_pages;
 static uint64_t free_pages;
-static uint64_t last_alloc_index = 0; /* O(1) start tracking */
+static uint64_t last_alloc_index = 0;
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static inline void bit_set(uint64_t page) {
@@ -62,7 +62,7 @@ void pmm_init(void) {
   bitmap_words = DIV_ROUND_UP(total_pages, 64);
   uint64_t bitmap_bytes = ALIGN_UP(bitmap_words * 8, PAGE_SIZE);
 
-  /* Find a big enough usable region to hold the bitmap itself. */
+  // Find a big enough usable region to hold the bitmap itself.
   uint64_t bitmap_phys = 0;
   for (uint64_t i = 0; i < mm->entry_count; i++) {
     struct limine_memmap_entry *e = mm->entries[i];
@@ -79,7 +79,7 @@ void pmm_init(void) {
   }
 
   bitmap = (uint64_t *)phys_to_virt(bitmap_phys);
-  memset(bitmap, 0xFF, bitmap_words * 8); /* everything starts "used" */
+  memset(bitmap, 0xFF, bitmap_words * 8); // Start with all pages reserved.
   free_pages = 0;
 
   for (uint64_t i = 0; i < mm->entry_count; i++) {
@@ -89,15 +89,13 @@ void pmm_init(void) {
     }
   }
 
-  /* Reserve the bitmap's own backing pages. */
+  // Reserve the bitmap's own backing pages.
   mark_range(bitmap_phys, bitmap_bytes, true);
 
-  /* Reserve page 0 to avoid triggering "NULL" allocation crashes. */
+  // Never allocate physical address 0.
   mark_range(0, PAGE_SIZE, true);
 
-  kprintf("[pmm] %lu MiB total, %lu MiB free, bitmap at 0x%p (%lu KiB)\n",
-          (highest) / (1024 * 1024), (free_pages * PAGE_SIZE) / (1024 * 1024),
-          (void *)bitmap_phys, bitmap_bytes / 1024);
+  kprintf("[pmm] %lu MiB total, %lu MiB free, bitmap at 0x%p (%lu KiB)\n", (highest) / (1024 * 1024), (free_pages * PAGE_SIZE) / (1024 * 1024), (void *)bitmap_phys, bitmap_bytes / 1024);
 }
 
 uint64_t pmm_alloc_pages(size_t count) {
@@ -110,9 +108,9 @@ uint64_t pmm_alloc_pages(size_t count) {
   uint64_t run_len = 0;
   uint64_t found = UINT64_MAX;
 
-  /* Phase 1: Search from last_alloc_index up to total_pages */
+  // Search from the allocation cursor to the end.
   for (uint64_t p = last_alloc_index; p < total_pages; p++) {
-    /* FAST SKIP: Jump over fully-allocated 64-page blocks in O(1) */
+    // Skip fully allocated bitmap words.
     if (run_len == 0 && (p % 64) == 0 && bitmap[p / 64] == 0xFFFFFFFFFFFFFFFF) {
       p += 63;
       continue;
@@ -130,10 +128,9 @@ uint64_t pmm_alloc_pages(size_t count) {
     }
   }
 
-  /* Phase 2: Wrap around and search from 0 to last_alloc_index */
+  // Wrap around to the beginning.
   run_len = 0;
   for (uint64_t p = 0; p < last_alloc_index; p++) {
-    /* FAST SKIP */
     if (run_len == 0 && (p % 64) == 0 && bitmap[p / 64] == 0xFFFFFFFFFFFFFFFF) {
       p += 63;
       continue;

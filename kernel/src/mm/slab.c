@@ -12,12 +12,9 @@ void slab_cache_init(struct slab_cache *cache, size_t obj_size, const char *name
   cache->num_pages = 0;
 }
 
-/* Caller holds cache->lock. Commits one more PMM page to the cache,
- * carving it into cache->obj_size slots and threading them onto the
- * free list. */
+// Caller holds cache->lock. Adds one PMM page and links its slots into the cache free list.
 static bool slab_grow_locked(struct slab_cache *cache) {
-  uint64_t phys = pmm_alloc_page(); /* pmm hands back zeroed frames --
-                                        nothing here needs to re-zero */
+  uint64_t phys = pmm_alloc_page();
   if (phys == 0) {
     return false;
   }
@@ -46,10 +43,7 @@ void *slab_alloc(struct slab_cache *cache) {
 
   spinlock_release_irqrestore(&cache->lock, f);
 
-  /* Zeroing happens after the lock is released -- `obj` is already
-   * unlinked from the free list, so no other CPU can be touching it,
-   * same reasoning mm/pmm.c's own pmm_alloc_pages() uses for zeroing
-   * outside pmm_lock. */
+  // Safe after unlocking: the object is no longer on the free list.
   memset(obj, 0, cache->obj_size);
   return obj;
 }

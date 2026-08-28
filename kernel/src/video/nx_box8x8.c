@@ -1,14 +1,10 @@
 #include "video/nx_box8x8.h"
 
-/* See nx_box8x8.h for the enum order / bit-order convention. Each
- * glyph is built from the same handful of "arm" primitives (a full
- * vertical/horizontal strand, or a half-strand stopping at the
- * center) around a fixed center point -- column/row 3 for the light
- * (single-line) set, columns/rows {2,4} for the double-line set --
- * so every glyph meets its neighbours pixel-perfectly when tiled
- * edge to edge in the console grid. Row comments show the exact
- * shape the byte below encodes (# = pixel on), same convention as
- * nx_font8x8.c. */
+/*
+ * 8x8 bitmaps for the supported box-drawing glyphs.
+ * Each row comment visualizes the byte below (# = pixel on).
+ */
+
 const uint8_t nx_box8x8[NX_BOX_GLYPH_COUNT][8] = {
     [NX_BOX_V] = { /* U+2502 │ */
         /* ...#.... */ 0x08,
@@ -260,4 +256,3 @@ bool nx_box_glyph_from_codepoint(uint32_t codepoint, enum nx_box_glyph *out) {
     return false;
   }
 }
-

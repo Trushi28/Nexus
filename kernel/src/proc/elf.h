@@ -3,10 +3,7 @@
 
 #include "klib/klib.h"
 
-/* Just enough ELF64 to load a static, non-PIE ET_EXEC binary -- no
- * dynamic linking, no relocations, no PIE. There's no libc/<elf.h>
- * available in a freestanding build, so the handful of structures and
- * constants actually needed live here. */
+/* Minimal ELF64 definitions for static, non-PIE ET_EXEC binaries. */
 
 typedef struct PACKED {
     uint8_t  e_ident[16];
@@ -47,21 +44,14 @@ typedef struct PACKED {
 
 struct elf_load_result {
     uint64_t entry;
-    uint64_t highest_vaddr; /* page-aligned end of the last PT_LOAD segment
-                                -- a sane starting point for the process's
-                                brk (see proc/process.h) */
+    uint64_t highest_vaddr; // Page-aligned end of the loaded image.
 };
 
-/* Loads a static, non-PIE ET_EXEC ELF64 image from `data` (length
- * `size`, fully buffered in kernel memory) into the given user address
- * space, mapping and populating every PT_LOAD segment. Physical pages
- * are reachable through the direct map regardless of which CR3 is
- * loaded, so this never needs to switch address spaces to do the
- * copying. Returns true on success and fills `out`; on failure, logs
- * why and returns false (any pages it already mapped stay mapped --
- * the caller is expected to vmm_free_user_space() the whole address
- * space on failure, not try to unwind piecemeal). */
-bool elf_load(uint64_t pml4_phys, const uint8_t *data, size_t size,
-              struct elf_load_result *out);
+/*
+ * Loads all PT_LOAD segments into `pml4_phys`.
+ * Returns true on success and fills `out`; on failure, logs the error
+ * and returns false. The caller must destroy the address space on failure.
+ */
+bool elf_load(uint64_t pml4_phys, const uint8_t *data, size_t size, struct elf_load_result *out);
 
 #endif /* NEXUS_ELF_H */

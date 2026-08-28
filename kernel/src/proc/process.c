@@ -67,8 +67,7 @@ struct task *process_spawn(const char *path, const char *name, uint32_t uid) {
 
   t->brk_start = ALIGN_UP(elf.highest_vaddr, PAGE_SIZE);
   t->brk = t->brk_start;
-  task_publish(t); /* only now, with brk_start/parent/fds already set --
-                       see task_publish()'s comment in sched.h */
+  task_publish(t); // Publish only after process initialization is complete.
   return t;
 }
 
