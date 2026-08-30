@@ -19,12 +19,7 @@
 static struct pci_device devices[PCI_MAX_DEVICES];
 static uint32_t device_count = 0;
 
-/* Guards the address-then-data I/O pair below: a config access is
- * really two separate port ops, and another CPU's access interleaving
- * between them would silently hit the wrong device's register. Nothing
- * exercised this before (PCI access only ever happened from the
- * single-threaded shell's `lspci`), but interrupt-context driver code
- * (NVMe's eventual completion handler, for one) changes that. */
+// Guards the address-then-data port pair -- interrupt-context callers now exist.
 static spinlock_t pci_cfg_lock = SPINLOCK_INIT;
 
 static uint32_t cfg_address(uint8_t bus, uint8_t slot, uint8_t func,
@@ -83,18 +78,13 @@ void pci_cfg_write8(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset,
   spinlock_release_irqrestore(&pci_cfg_lock, f);
 }
 
-/* --------------------------- BAR decoding ---------------------------- */
-
-/* `readback_after_allones` is what you get reading a BAR register back
- * after writing all-1s to it: bits the device actually implements come
- * back 1, the hardwired-0 bits (which encode the region's size) stay 0.
- * `low_bits_mask` strips the low, non-size flag bits first (0x3 for an
- * I/O BAR, 0xF for a memory BAR). */
+/* `readback_after_allones` comes from writing all-1s to a BAR then
+ * reading back -- implemented bits return 1, size-encoding bits stay 0. */
 static uint64_t decode_bar_size(uint32_t readback_after_allones,
                                 uint32_t low_bits_mask) {
   uint32_t size_bits = readback_after_allones & ~low_bits_mask;
   if (size_bits == 0) {
-    return 0; /* not implemented, or the unused high half of a 64-bit pair */
+    return 0;
   }
   return (uint64_t)(~size_bits + 1);
 }
@@ -114,9 +104,6 @@ static void probe_bars(struct pci_device *dev) {
     struct pci_bar *bar = &dev->bars[i];
 
     if (orig & 1) {
-      /* I/O space BAR. Nothing here needs one yet (NVMe, like
-       * most modern hardware, is MMIO-only) -- decode it anyway
-       * so lspci can show it and the array stays consistent. */
       pci_cfg_write32(dev->bus, dev->slot, dev->func, off, 0xFFFFFFFF);
       uint32_t readback = pci_cfg_read32(dev->bus, dev->slot, dev->func, off);
       pci_cfg_write32(dev->bus, dev->slot, dev->func, off, orig);
@@ -141,7 +128,7 @@ static void probe_bars(struct pci_device *dev) {
 
     if (is_64) {
       if (i + 1 >= PCI_MAX_BARS) {
-        break; /* malformed device -- a 64-bit BAR in the last slot */
+        break;
       }
       uint8_t hi_off = (uint8_t)(off + 4);
       uint32_t orig_hi = pci_cfg_read32(dev->bus, dev->slot, dev->func, hi_off);
@@ -153,16 +140,12 @@ static void probe_bars(struct pci_device *dev) {
 
       base |= (uint64_t)orig_hi << 32;
       if (hi_readback != 0) {
-        /* A region bigger than 4GiB carries into the high dword
-         * -- combine both halves before inverting. Essentially
-         * never happens for anything this kernel talks to, but
-         * cheap to get right. */
         uint64_t combined =
             ((uint64_t)hi_readback << 32) | (low_readback & ~0xFull);
         size = ~combined + 1;
       }
 
-      i++; /* the next slot is this BAR's high dword, already consumed */
+      i++; // next slot is this BAR's high dword, already consumed
     }
 
     bar->present = true;
@@ -173,8 +156,6 @@ static void probe_bars(struct pci_device *dev) {
     bar->size = size;
   }
 }
-
-/* ------------------------------- scan --------------------------------- */
 
 void pci_scan(void) {
   device_count = 0;
@@ -187,7 +168,7 @@ void pci_scan(void) {
         uint16_t vendor = id & 0xFFFF;
         if (vendor == 0xFFFF) {
           if (func == 0) {
-            break; /* no device at all in this slot */
+            break;
           }
           continue;
         }
@@ -215,7 +196,7 @@ void pci_scan(void) {
               pci_cfg_read32((uint8_t)bus, (uint8_t)slot, 0, 0x0C);
           bool multifunction = ((header >> 16) & 0x80) != 0;
           if (!multifunction) {
-            break; /* only function 0 exists */
+            break;
           }
         }
       }
@@ -287,8 +268,6 @@ const char *pci_class_name(uint8_t class_code) {
   }
 }
 
-/* ------------------------- enable / capabilities ----------------------- */
-
 void pci_enable_device(const struct pci_device *dev) {
   uint16_t cmd = pci_cfg_read16(dev->bus, dev->slot, dev->func, 0x04);
   cmd |= PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER;
@@ -303,8 +282,7 @@ bool pci_find_capability(const struct pci_device *dev, uint8_t cap_id,
   }
 
   uint8_t ptr = pci_cfg_read8(dev->bus, dev->slot, dev->func, 0x34) & 0xFC;
-  int guard = 0; /* a malformed cap chain could cycle -- bound the walk
-                     rather than trust it to terminate */
+  int guard = 0; // bounds a malformed/cyclic capability chain
   while (ptr != 0 && guard++ < 64) {
     uint8_t id = pci_cfg_read8(dev->bus, dev->slot, dev->func, ptr);
     if (id == cap_id) {
@@ -316,8 +294,6 @@ bool pci_find_capability(const struct pci_device *dev, uint8_t cap_id,
   }
   return false;
 }
-
-/* --------------------------------- MSI-X -------------------------------- */
 
 struct pci_msix_table_entry {
   uint32_t msg_addr_lo;
@@ -355,10 +331,7 @@ bool pci_msix_init(struct pci_device *dev, struct pci_msix *out) {
           out->num_vectors * sizeof(struct pci_msix_table_entry));
   out->table = (void *)table;
 
-  /* Mask every entry until the driver explicitly arms the ones it
-   * wants -- an unconfigured entry (address/vector still zero) firing
-   * on live hardware before anything can handle it is miserable to
-   * debug. */
+  // Mask every entry until the driver explicitly arms the ones it wants.
   for (uint32_t i = 0; i < out->num_vectors; i++) {
     table[i].vector_control = MSIX_VECTOR_MASKED;
   }
@@ -373,15 +346,12 @@ void pci_msix_set_vector(struct pci_device *dev, struct pci_msix *msix,
   volatile struct pci_msix_table_entry *table =
       (volatile struct pci_msix_table_entry *)msix->table;
 
-  /* Fixed delivery, edge-triggered, physical destination -- the
-   * standard x86 MSI address/data encoding. Only encodes an 8-bit
-   * destination APIC ID (address bits 12-19); a machine with more
-   * than 256 CPUs would need the x2APIC extended-destination-ID
-   * scheme -- moot here, MAX_CPUS is 256. */
+  /* Fixed/edge/physical MSI encoding; only an 8-bit destination APIC ID
+   * (address bits 12-19) -- fine since MAX_CPUS is 256. */
   table[index].msg_addr_lo = 0xFEE00000u | ((dest_apic_id & 0xFFu) << 12);
   table[index].msg_addr_hi = 0;
   table[index].msg_data = vector;
-  table[index].vector_control = 0; /* unmask this one entry */
+  table[index].vector_control = 0;
 }
 
 void pci_msix_enable(struct pci_device *dev, struct pci_msix *msix) {

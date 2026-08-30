@@ -39,11 +39,6 @@ static void cmd_gload(const char *args);
 static void cmd_topcmds(const char *args);
 static void cmd_exit(const char *args);
 
-/* Same non-POSIX naming philosophy as the kernel shell (shell.c):
- * several spellings, one canonical handler. Several of these
- * deliberately match shell.c's OWN synonym table 1:1 (mem/free,
- * cpu, poweroff/halt, save/load) so a habit picked up in one shell
- * carries straight over to the other. */
 struct nsh_synonym {
   const char *alias;
   const char *canonical;
@@ -120,10 +115,6 @@ static const char *normalize_verb(const char *verb, char *scratch,
   return verb;
 }
 
-/* Plain integer Levenshtein distance -- same algorithm and same
- * reason as shell.c's edit_distance(): no floats anywhere in this
- * build (-mno-sse/-mno-mmx/-mno-80387), and these strings are a
- * handful of characters, nothing here needs to be fast. */
 static int edit_distance(const char *a, const char *b) {
   int la = (int)u_strlen(a);
   int lb = (int)u_strlen(b);
@@ -210,11 +201,7 @@ static void suggest_commands(const char *typed) {
 }
 
 #define MAX_JOBS 8
-#define NX_TASK_STATE_DEAD                                                     \
-  5 /* mirrors enum task_state in sched/sched.h --                             \
-        see abi/task_info.h's comment on why this                              \
-        crosses the user/kernel boundary as a bare                             \
-        numeric constant, not a shared enum. */
+#define NX_TASK_STATE_DEAD 5
 
 struct bg_job {
   bool used;
@@ -352,12 +339,6 @@ static void cmd_ls(const char *args) {
   }
 }
 
-/* No local cwd tracking here at all -- SYS_chdir commits the new cwd
- * kernel-side (struct task::cwd, cpu/syscall.c), and print_prompt()
- * reads it back fresh via u_getcwd() on every prompt. Nothing else
- * can ever change this task's cwd out from under it, so there's
- * nothing to keep in sync locally -- the kernel's copy is the only
- * copy. */
 static void cmd_cd(const char *args) {
   const char *target = (*args == '\0') ? "/" : args;
   if (u_chdir(target) < 0) {
@@ -497,13 +478,6 @@ static void cmd_kill(const char *args) {
   u_print("kill: signalled -- exits at its next syscall\n");
 }
 
-/* Renders a byte count in MiB -- u_itoa() only takes a plain `int`,
- * so anything finer-grained (KiB, exact bytes) risks overflowing it
- * on a machine with more than ~2GiB of RAM; MiB keeps every realistic
- * value comfortably inside int32 range. Coarser than shell.c's own
- * fmt_bytes()/print_usage_bar() (which have ksnprintf() and a real
- * framebuffer bar to work with), but plenty for a quick userland
- * check. */
 static void print_mib(unsigned long bytes) {
   char buf[16];
   u_itoa((int)(bytes / (1024 * 1024)), buf);
@@ -544,9 +518,6 @@ static void cmd_cpuinfo(const char *args) {
   u_print(info.x2apic ? "enabled\n" : "not in use\n");
 }
 
-/* u_reboot()/u_shutdown() never return on success -- the print below
- * only ever gets a chance to read as "did nothing" if the syscall
- * itself was refused (not root; see 'whoami'/'drop'). */
 static void cmd_reboot(const char *args) {
   (void)args;
   u_print("rebooting...\n");
@@ -751,11 +722,6 @@ static void print_banner(void) {
   }
 }
 
-/* Shows this task's OWN cwd, read fresh from the kernel every time --
- * see cmd_cd()'s comment for why there's no local copy to keep in
- * sync. Falls back to "?" rather than silently omitting it if
- * u_getcwd() somehow fails (it shouldn't -- LINE_MAX is comfortably
- * larger than struct task::cwd's own TASK_CWD_MAX). */
 static void print_prompt(void) {
   char cwd[LINE_MAX];
   if (!u_getcwd(cwd, sizeof(cwd))) {

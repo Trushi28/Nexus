@@ -3,16 +3,9 @@
 
 #include "klib/klib.h"
 
-/*
- * A small, generic virtual filesystem layer: a vnode tree with a
- * per-node operations table, so any concrete filesystem (today, just
- * fs/tmpfs.c) can plug in without the rest of the kernel caring how a
- * given file is actually stored. The primary root ("/") is set once
- * via vfs_set_root(); additional filesystems can be grafted in at any
- * path with vfs_mount() (see below) -- resolution picks the longest
- * matching mount prefix, same idea as a real Unix mount table, just
- * without the ability to unmount something still busy.
- */
+/* Generic vnode-tree VFS layer: any filesystem plugs in via a
+ * per-node vnode_ops table. Root is set once via vfs_set_root();
+ * vfs_mount() grafts more in, resolving on longest-prefix match. */
 
 enum vnode_type {
   VNODE_FILE,
@@ -22,53 +15,25 @@ enum vnode_type {
 struct vnode;
 
 struct vnode_ops {
-  /* Reads up to `len` bytes starting at `offset` into `buf`. Returns
-   * the number of bytes actually read (0 at EOF). */
   size_t (*read)(struct vnode *node, uint64_t offset, void *buf, size_t len);
 
-  /* Writes `len` bytes at `offset`, growing the file if `offset+len`
-   * reaches past the current end. Returns the number of bytes
-   * actually written (less than `len` only on OOM). */
+  // Grows the file if offset+len passes the current end.
   size_t (*write)(struct vnode *node, uint64_t offset, const void *buf,
                   size_t len);
 
-  /* Returns the child named `name` inside a directory node, or NULL
-   * if there isn't one. */
   struct vnode *(*lookup)(struct vnode *dir, const char *name);
 
-  /* Creates and returns a new child of the given type inside a
-   * directory node, or NULL (already exists, OOM, ...). `owner_uid`
-   * is who a FRESHLY created node should be owned by (struct
-   * vnode::owner_uid below) -- irrelevant if this call ends up
-   * returning an already-existing node instead (every implementation
-   * leaves that node's original owner untouched). */
+  // owner_uid only applies if this call actually creates a new node.
   struct vnode *(*create)(struct vnode *dir, const char *name,
                           enum vnode_type type, uint32_t owner_uid);
 
-  /* Fills `name_out` (a caller buffer of `name_max` bytes) with the
-   * name of the `index`'th child of a directory node, in whatever
-   * order the filesystem happens to keep them. Returns false once
-   * `index` is past the last child. */
   bool (*readdir)(struct vnode *dir, uint32_t index, char *name_out,
                   size_t name_max);
 
-  /* Truncates a file node to zero length. NULL for node types that
-   * can't be truncated (directories -- there's no vnode_ops instance
-   * without one today, but the pointer is still checked rather than
-   * assumed, the same way every other optional op here is). */
   bool (*truncate)(struct vnode *node);
 
-  /* Optional lifecycle hooks, not I/O: called once when a vfs_file is
-   * created for this vnode (a successful vfs_open()) and once when
-   * that vfs_file is closed (vfs_close()). NULL for filesystems
-   * (tmpfs) that don't need per-open bookkeeping, since a tmpfs
-   * node's lifetime isn't reclaimed while it's still reachable from
-   * the tree anyway. Graph nodes (fs/graphfs_vfs.c) ARE reclaimed out
-   * from under a path the moment their graph-level refcount hits
-   * zero -- these hooks are how an open fd counts as one more such
-   * reference, so grm/gunlink/ggc/gclear can't free a node a
-   * classic-VFS handle is still using underneath it. vfs_dup() below
-   * relies on these too, for exactly the same reason. */
+  /* Lifecycle hooks, not I/O -- called once per vfs_open()/vfs_close().
+   * NULL for filesystems (tmpfs) with nothing to track per-open. */
   void (*open)(struct vnode *node);
   void (*close)(struct vnode *node);
 };
@@ -76,132 +41,59 @@ struct vnode_ops {
 struct vnode {
   enum vnode_type type;
   char name[64];
-  uint64_t size; /* VNODE_FILE only; 0 for directories */
+  uint64_t size; // VNODE_FILE only
   const struct vnode_ops *ops;
-  void *fs_data; /* filesystem-private node */
+  void *fs_data;
 
-  /* ------------------------------ ownership -----------------------------
-   * Who created this node -- 0 is root, and root bypasses every check
-   * vfs_open_as() below makes. This is the WHOLE permission model:
-   * one owner, no groups, no separate read/write/execute bits (there's
-   * no concept of "execute" for a file at this layer anyway -- ELF
-   * loading reads bytes like anything else). Read access is never
-   * gated by this field at all -- there's no concept of a private file
-   * in Nexus, only a protected one, since there's no login/session
-   * concept to build real privacy on top of (see docs/Design.md).
-   * Populated once, at creation, by whichever vnode_ops::create()
-   * implementation actually allocated this node -- tmpfs
-   * (fs/tmpfs.c) stores it directly on this persistent struct (never
-   * touched again after creation); the graph filesystem
-   * (fs/graphfs_vfs.c) mirrors it here from struct gnode::owner_uid
-   * on every graphfs_wrap() call, since ITS vnode is rebuilt fresh on
-   * every access rather than persisting like tmpfs's does. */
+  /* Who created this node -- the whole permission model (no groups,
+   * no read/write/execute bits). Read is never gated by this at all;
+   * see vfs_open_as() for the one place it matters. */
   uint32_t owner_uid;
 };
 
 struct vfs_file {
   struct vnode *node;
   uint64_t offset;
-  int flags; /* the O_* flags (abi/syscall_nr.h) this was opened with --
-                O_RDONLY/O_WRONLY/O_RDWR is all cpu/syscall.c's
-                sys_read_impl()/sys_write_impl() actually check today. */
+  int flags; // the O_* flags this was opened with
 };
 
 void vfs_init(void);
-/* Installs `root` as the single mounted root ("/"). Call once at boot
- * before anything tries to open a path. */
 void vfs_set_root(struct vnode *root);
 struct vnode *vfs_root(void);
 
 #define VFS_MAX_MOUNTS 8
 #define VFS_MOUNT_MAX_DEPTH 4
 
-/* Grafts `root` into the namespace at `path` (e.g. "/mnt/data"), so
- * any lookup under it resolves through `root` instead of the primary
- * root. The longest matching mount prefix wins if more than one could
- * apply. `path` itself is NOT auto-created as a directory in the
- * parent filesystem -- create it first (vfs_lookup_or_create()) if
- * you want it to show up in a readdir() of its parent, the same way a
- * real mount point is an ordinary directory until something's
- * mounted on it. Returns false if the mount table is full, `path` is
- * "/" itself (use vfs_set_root() for that) or too deep for
- * VFS_MOUNT_MAX_DEPTH components, or something is already mounted at
- * exactly that path. */
+/* Grafts `root` into the namespace at `path`. Doesn't auto-create
+ * `path` itself -- create it first if you want it to show up in a
+ * readdir() of its parent. False if the slot's taken or path is "/". */
 bool vfs_mount(const char *path, struct vnode *root);
 
-/* Removes a mount previously installed at exactly `path`. Returns
- * false if nothing is mounted there. Doesn't touch anything mounted
- * *under* it -- unmount those first. */
 bool vfs_unmount(const char *path);
 
-/* Resolves an absolute, '/'-separated path to a vnode ("/" or ""
- * itself resolves to the root). Returns NULL if any path component is
- * missing. Always absolute, whether or not `path` starts with '/' --
- * this function itself has no working-directory concept; see
- * vfs_resolve_relative() below for the piece that adds one on top.
- * Never gated by ownership -- see struct vnode::owner_uid's comment
- * on why reading is always unrestricted. */
+/* Resolves an absolute path ("/" or "" is the root). NULL if any
+ * component is missing. Never gated by ownership. */
 struct vnode *vfs_lookup_path(const char *path);
 
-/* Joins `in` onto `cwd` (verbatim if `in` is already absolute) and
- * normalizes the result into `out` -- collapsing "." and empty
- * segments, and popping one component per ".." -- WITHOUT touching
- * the VFS at all; whether the result actually exists is up to the
- * caller to check afterward (typically via vfs_lookup_path() or
- * vfs_open()). This is the one piece of cwd-awareness in the whole
- * VFS layer: every lookup/open/create function above stays strictly
- * absolute-path, cwd-agnostic, and this is the single place a caller
- * that DOES have a notion of "current directory" -- the kernel
- * shell's own interactive cwd, or a ring-3 task's struct task::cwd
- * (sched/sched.h), set via SYS_chdir -- turns a possibly-relative
- * path into one of those absolute paths first. Shared rather than
- * duplicated per-caller: the kernel shell (shell/shell.c) and the
- * syscall layer (cpu/syscall.c's sys_open_impl/sys_readdir_impl/
- * sys_spawn_impl/sys_exec_impl/sys_chdir_impl) all call this exact
- * function instead of each keeping their own copy of the same
- * split-and-normalize logic. */
+/* Joins `in` onto `cwd` (verbatim if already absolute) and normalizes
+ * the result -- doesn't touch the VFS itself. The one cwd-aware entry
+ * point; every lookup/open/create above stays absolute-path only. */
 #define VFS_RESOLVE_MAX_DEPTH 16
 void vfs_resolve_relative(const char *cwd, const char *in, char *out,
                           size_t out_max);
 
-/* Like vfs_lookup_path(), but creates any missing intermediate path
- * components as directories, and the final component (if missing) as
- * `type`. The "mkdir -p" primitive the initrd unpacker uses. Every
- * freshly-created node along the way (intermediate directories
- * included) is owned by `uid`; a node that already existed keeps
- * whatever owner it already had. Creation itself is never refused for
- * ownership reasons -- only a later WRITE to something you don't own
- * is (see vfs_open_as()) -- so `uid` here is purely "who gets to own
- * whatever ends up getting created", not a permission gate. */
+/* Like vfs_lookup_path(), but creates missing intermediate directories
+ * and the final component as `type`, owned by `uid`. */
 struct vnode *vfs_lookup_or_create(const char *path, enum vnode_type type,
                                    uint32_t uid);
 
-/* `flags` is the same O_* bitfield as abi/syscall_nr.h's open() --
- * O_CREAT creates a missing file, O_RDONLY/O_WRONLY/O_RDWR (extract
- * with `flags & O_ACCMODE`) is recorded on the resulting vfs_file for
- * later enforcement, and any other bit (O_TRUNC included) is stored
- * but otherwise ignored by vfs_open() itself -- see vfs_truncate()
- * for that one, called separately after open by whoever wants it.
- * Equivalent to vfs_open_as(path, flags, 0, out) below -- i.e. every
- * TRUSTED, kernel-internal caller (the initrd unpacker, process_spawn()
- * reading an ELF, the kernel shell's own cat/run/...) opens as root
- * and is therefore never refused by the ownership check. The one
- * caller that has to be honest about who's actually asking is the
- * open() syscall itself (cpu/syscall.c's sys_open_impl), which calls
- * vfs_open_as() directly with the calling ring-3 task's real uid. */
+/* Equivalent to vfs_open_as(path, flags, 0, out) -- every trusted,
+ * kernel-internal caller opens as root. */
 bool vfs_open(const char *path, int flags, struct vfs_file **out);
 
-/* Same contract as vfs_open(), but checks ownership before granting a
- * write-capable handle -- see struct vnode::owner_uid's comment.
- * Concretely: opening for plain read (no O_WRONLY/O_RDWR/O_TRUNC) is
- * always allowed, for everyone, on anything that already exists.
- * Opening with O_WRONLY, O_RDWR, or O_TRUNC set against a node that
- * ALREADY EXISTED before this call is refused unless `uid == 0`
- * (root) or `uid` matches that node's owner. A brand new node
- * (O_CREAT, nothing was there before) is always created successfully
- * regardless of `uid` -- creation isn't gated, only tampering with
- * something someone else already made is -- and the new node is
- * owned by `uid` from that point on. */
+/* Checks ownership before granting a write-capable handle: opening
+ * O_WRONLY/O_RDWR/O_TRUNC on a PRE-EXISTING node owned by someone else
+ * is refused unless uid==0. A brand-new (O_CREAT) node is never gated. */
 bool vfs_open_as(const char *path, int flags, uint32_t uid,
                  struct vfs_file **out);
 
@@ -214,9 +106,6 @@ uint64_t vfs_file_size(struct vfs_file *f);
 
 bool vfs_truncate(struct vfs_file *f);
 
-/* Lists directory `path`'s `index`'th entry into `name_out` (a buffer
- * of `name_max` bytes). Returns false once `index` is past the last
- * entry (or `path` doesn't resolve to a directory at all). */
 bool vfs_readdir(const char *path, uint32_t index, char *name_out,
                  size_t name_max);
 

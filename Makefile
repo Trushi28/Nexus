@@ -1,25 +1,4 @@
 # Nexus -- top-level build orchestration.
-#
-# This file is deliberately modelled on the official Limine C template
-# (https://github.com/limine-bootloader/limine-c-template-x86-64) so that
-# it keeps working as Limine itself evolves. It does three things:
-#
-#   1. Downloads a pinned Limine binary release (host tool + bootloader
-#      images) -- no toolchain other than 'make' and 'curl' needed for this.
-#   2. Builds the kernel and userland by recursing into kernel/Makefile and
-#      userland/Makefile.
-#   3. Packs kernel + Limine into a bootable ISO (BIOS+UEFI) and/or a raw
-#      GPT hard-disk/USB image (BIOS+UEFI) that can be `dd`'d to a stick.
-#
-# EVERYTHING this produces -- kernel/userland object files and binaries,
-# the fetched Limine/OVMF/limine.h/font8x8 third-party bits, iso_root/,
-# initrd.tar, the final .iso/.hdd images, even the QEMU scratch disk --
-# lands under $(BUILD_DIR) (./build by default). `rm -rf build` always
-# gets you back to a byte-identical clean checkout; nothing this
-# Makefile touches lives outside it. See docs/BUILD_LAYOUT.md.
-#
-# Nothing here is executed automatically -- this repository ships as source
-# only. Run `make all-hdd` (or `make all`) yourself when you're ready.
 
 .SUFFIXES:
 

@@ -28,12 +28,9 @@ uint32_t blockdev_sector_size(void) {
   return (active_ops != NULL) ? active_ops->sector_size() : 0;
 }
 
-/* Guards every blockdev_read()/blockdev_write() call against any
- * other concurrent one -- see blockdev.h's comment on those two for
- * the full reasoning. Exactly the same CAS-spin-and-yield shape
- * fs/graph.c used to hand-roll for its own two callers specifically
- * (as `disk_op_lock`); living here instead means every caller gets
- * it, not just those two. */
+/* CAS-spin-and-yield, not a spinlock -- this can block on a completion
+ * interrupt, and holding a spinlock across that would disable IRQs
+ * on this cpu for as long as the disk takes to answer. */
 static volatile bool io_busy = false;
 
 static void io_lock(void) {

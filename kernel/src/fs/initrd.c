@@ -2,12 +2,9 @@
 #include "debug/log.h"
 #include "fs/vfs.h"
 
-/* POSIX ustar header, 512 bytes exactly. Numeric fields are ASCII
- * octal, NUL- or space-terminated; text fields are NOT guaranteed
- * NUL-terminated if they exactly fill their field width, so every
- * field gets copied into a bounded local buffer before use -- see
- * field_copy() below. Reference: POSIX.1-2001, "ustar interchange
- * format". */
+/* POSIX ustar header, 512 bytes. Numeric fields are ASCII octal; text
+ * fields aren't guaranteed NUL-terminated, so every field is copied
+ * through field_copy() before use. */
 struct PACKED ustar_header {
   char name[100];
   char mode[8];
@@ -29,7 +26,7 @@ struct PACKED ustar_header {
 };
 
 #define TAR_TYPE_FILE '0'
-#define TAR_TYPE_AFILE '\0' /* old tar's "regular file", pre-POSIX */
+#define TAR_TYPE_AFILE '\0' // old tar's "regular file"
 #define TAR_TYPE_DIR '5'
 
 static uint64_t parse_octal(const char *field, size_t len) {
@@ -40,11 +37,7 @@ static uint64_t parse_octal(const char *field, size_t len) {
   return v;
 }
 
-/* Copies a possibly-not-NUL-terminated fixed-width tar field into a
- * NUL-terminated buffer. kvsnprintf() has no %.Ns precision support
- * (see klib/printf.c's header comment on what it does and doesn't
- * implement), so this -- not a "%.100s"-style format string -- is how
- * every name/prefix field gets bounded before it's used with "%s". */
+// Copies a possibly-non-NUL-terminated fixed-width tar field, bounded.
 static void field_copy(char *dst, size_t dst_size, const char *src,
                        size_t src_len) {
   size_t max = dst_size > 0 ? dst_size - 1 : 0;
@@ -57,16 +50,7 @@ static void field_copy(char *dst, size_t dst_size, const char *src,
   dst[real] = '\0';
 }
 
-/* Same FNV-1a 32-bit hash fs/graph.c's own disk snapshot uses (see
- * that file's fnv1a32()) -- kept as its own copy here rather than
- * shared, same "small, self-contained routine, not worth threading a
- * shared header through two unrelated subsystems for" reasoning
- * fs/vfs.c already gives for its own split_path() copy. Purely a
- * boot-log diagnostic: printed per unpacked file so a corrupted or
- * truncated initrd.tar (a bad download, a flaky build, a botched
- * `dd`) shows up as a visible number in the boot log instead of
- * manifesting later as a mysterious crash the first time something
- * tries to `run` the affected binary. */
+// Same FNV-1a hash fs/graph.c uses -- kept as its own copy, too small to share.
 static uint32_t fnv1a32(const void *data, size_t len) {
   const uint8_t *p = (const uint8_t *)data;
   uint32_t h = 0x811C9DC5u;
@@ -86,7 +70,7 @@ uint32_t initrd_unpack(const void *data, size_t size) {
     const struct ustar_header *h = (const struct ustar_header *)(p + off);
 
     if (h->name[0] == '\0') {
-      break; /* end-of-archive marker: a zeroed header block */
+      break; // end-of-archive marker
     }
     if (memcmp(h->magic, "ustar", 5) != 0) {
       kprintf("[initrd] not a ustar archive at offset %lu, stopping\n", off);
@@ -106,21 +90,8 @@ uint32_t initrd_unpack(const void *data, size_t size) {
     off += sizeof(struct ustar_header);
 
     if (path[0] == '\0') {
-      /* A degenerate member: empty name AND empty prefix, but not
-       * the real end-of-archive zeroed block (already caught
-       * above by h->name[0] == '\0'). Shouldn't happen from any
-       * real tar implementation; skip its data region rather
-       * than handing vfs_lookup_or_create() an empty path (which
-       * resolves to the root itself) and silently doing nothing
-       * useful with whatever typeflag/size followed. */
       kprintf("[initrd] skipping archive member with an empty path\n");
     } else if (fsize > size - off) {
-      /* Truncated archive: this member claims more data than is
-       * actually left. Stop here rather than the old behaviour
-       * of silently creating an empty/truncated vnode and still
-       * counting it as "unpacked" -- a corrupt initrd.tar should
-       * be a loud boot-log failure, not a phantom success that
-       * only shows up later as a 0-byte binary refusing to run. */
       kprintf("[initrd] '%s' claims %lu byte(s), more than the %lu "
               "remaining in the archive -- stopping (truncated or "
               "corrupt initrd.tar)\n",
@@ -158,8 +129,6 @@ uint32_t initrd_unpack(const void *data, size_t size) {
         files++;
       }
     }
-    /* Any other typeflag (symlink, device node, ...) is silently
-     * skipped -- tmpfs has no concept of them yet. */
 
     uint64_t aligned = ALIGN_UP(fsize, 512);
     if (off + aligned < off) {

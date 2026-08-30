@@ -3,13 +3,11 @@
 #include "panic.h"
 
 struct tmpfs_node {
-  struct vnode vnode; /* embedded; vnode.fs_data points back at this node */
-  uint8_t *data;      /* VNODE_FILE only */
-  size_t capacity;    /* VNODE_FILE only -- allocated size of `data` */
-  struct tmpfs_node
-      *children; /* VNODE_DIR only: singly-linked list of entries */
-  struct tmpfs_node
-      *next; /* sibling link within the parent's `children` list */
+  struct vnode vnode; // embedded; vnode.fs_data points back at this node
+  uint8_t *data;      // VNODE_FILE only
+  size_t capacity;    // VNODE_FILE only
+  struct tmpfs_node *children; // VNODE_DIR only
+  struct tmpfs_node *next;     // sibling link within the parent's children
 };
 
 static struct vnode *tmpfs_lookup(struct vnode *dir, const char *name);
@@ -48,9 +46,7 @@ static struct tmpfs_node *tmpfs_alloc(const char *name, enum vnode_type type,
 }
 
 struct vnode *tmpfs_create_root(void) {
-  struct tmpfs_node *root = tmpfs_alloc("/", VNODE_DIR, 0); /* root's root
-                                                                is owned by
-                                                                root */
+  struct tmpfs_node *root = tmpfs_alloc("/", VNODE_DIR, 0);
   if (root == NULL) {
     panic("tmpfs: out of memory creating the root directory");
   }
@@ -59,11 +55,7 @@ struct vnode *tmpfs_create_root(void) {
 
 static struct vnode *tmpfs_lookup(struct vnode *dir, const char *name) {
   if (dir->type != VNODE_DIR) {
-    return NULL; /* tmpfs files never have children -- enforced here,
-                    not by a caller-side type check, now that walk()
-                    (fs/vfs.c) no longer gates on vnode->type itself
-                    (a graph node's type can change as edges come and
-                    go; tmpfs's can't, so it still has to say so). */
+    return NULL; // tmpfs files never have children
   }
   struct tmpfs_node *d = dir->fs_data;
   for (struct tmpfs_node *c = d->children; c != NULL; c = c->next) {
@@ -145,8 +137,6 @@ static size_t tmpfs_write(struct vnode *node, uint64_t offset, const void *buf,
     return 0;
   }
 
-  /* Zero-fill a gap created by writing past the current EOF (a
-   * sparse-write "hole"), matching normal file semantics. */
   if (offset > node->size) {
     memset(n->data + node->size, 0, (size_t)(offset - node->size));
   }
@@ -159,14 +149,6 @@ static size_t tmpfs_write(struct vnode *node, uint64_t offset, const void *buf,
 }
 
 static bool tmpfs_truncate(struct vnode *node) {
-  /* Just drop the logical length back to 0 -- the backing
-   * allocation (n->data/n->capacity) is left exactly as-is, same
-   * spirit as kfree() never shrinking the heap back to the OS: the
-   * next write() reuses it via tmpfs_ensure_capacity()'s existing
-   * growth logic instead of paying to free and re-allocate. Directories
-   * never reach here (tmpfs_ops.truncate is only consulted through
-   * vfs_truncate(), which vfs_open() only calls after confirming
-   * VNODE_FILE). */
-  node->size = 0;
+  node->size = 0; // backing allocation is kept, reused by the next write
   return true;
 }

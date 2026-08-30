@@ -8,35 +8,22 @@
 #include "mm/vmm.h"
 #include "time/timer.h"
 
-/* ---- PCI identification (spec 5.1.4, 4.1.2) ----
- * Non-transitional (modern-only) virtio-blk-pci is vendor 0x1AF4,
- * device 0x1042 (0x1040 + block's virtio device ID, 2). Transitional
- * devices (support legacy AND modern simultaneously) present 0x1001
- * instead but still expose the full modern capability list this
- * driver uses -- VERIFY ON REAL QEMU which ID your target actually
- * presents; recent QEMU defaults to 0x1042 (`disable-legacy=on` is
- * QEMU's own current default for virtio-blk-pci), older/explicit
- * transitional configurations present 0x1001. Both are accepted here;
- * the real gate is negotiate_features() requiring VIRTIO_F_VERSION_1,
- * which is what actually determines "does modern config work at
- * all", not the PCI ID (which is only a fast way to find candidates). */
+/* Non-transitional virtio-blk-pci is 0x1AF4:0x1042; transitional devices
+ * present 0x1001 -- both accepted, gated instead on VIRTIO_F_VERSION_1. */
 #define VIRTIO_PCI_VENDOR_ID 0x1AF4
 #define VIRTIO_BLK_DEVICE_ID_TRANSITIONAL 0x1001
 #define VIRTIO_BLK_DEVICE_ID_MODERN 0x1042
 
-/* ---- vendor-specific PCI capability layout (spec 4.1.4) ---- */
 #define PCI_CAP_ID_VENDOR 0x09
 #define VIRTIO_PCI_CAP_COMMON_CFG 1
 #define VIRTIO_PCI_CAP_NOTIFY_CFG 2
 #define VIRTIO_PCI_CAP_DEVICE_CFG 4
-/* byte offsets within one vendor capability structure */
 #define VIRTIO_CAP_OFF_CFG_TYPE 3
 #define VIRTIO_CAP_OFF_BAR 4
 #define VIRTIO_CAP_OFF_OFFSET 8
 #define VIRTIO_CAP_OFF_LENGTH 12
-#define VIRTIO_CAP_OFF_NOTIFY_MULTIPLIER 16 /* NOTIFY_CFG only */
+#define VIRTIO_CAP_OFF_NOTIFY_MULTIPLIER 16 // NOTIFY_CFG only
 
-/* ---- common configuration structure (spec 4.1.4.3), MMIO-mapped ---- */
 struct PACKED virtio_pci_common_cfg {
   uint32_t device_feature_select;
   uint32_t device_feature;
@@ -65,25 +52,13 @@ struct PACKED virtio_pci_common_cfg {
 #define VIRTIO_STATUS_FEATURES_OK 8
 #define VIRTIO_STATUS_FAILED 128
 
-#define VIRTIO_F_VERSION_1_BIT 0 /* bit 32 overall == bit 0 of the high half */
+#define VIRTIO_F_VERSION_1_BIT 0 // bit 32 overall == bit 0 of the high half
 
-/* ---- device-specific configuration (spec 5.2.4), MMIO-mapped ----
- * Only the fields this driver actually reads are named individually;
- * the rest are only ever skipped over via `reserved_tail`, never
- * negotiated (see the file header comment). */
 struct PACKED virtio_blk_config {
-  uint64_t capacity; /* ALWAYS in 512-byte sectors, regardless of any
-                         negotiated blk_size */
-  uint8_t reserved_tail[52]; /* size_max, seg_max, geometry, blk_size,
-                                 topology, writeback, discard/write-zeroes
-                                 fields -- none negotiated, none read */
+  uint64_t capacity; // always in 512-byte sectors, regardless of blk_size
+  uint8_t reserved_tail[52];
 };
 
-/* ---- split virtqueue layout (spec 2.7) ----
- * Three separately-allocated regions rather than one combined buffer
- * with manual offset math -- simpler, and each is already page-sized
- * or smaller for any realistic queue depth, so there's no real memory
- * cost to keeping them apart. */
 struct PACKED virtq_desc {
   uint64_t addr;
   uint32_t len;
@@ -110,33 +85,32 @@ struct PACKED virtq_used_hdr {
 struct virtqueue {
   uint16_t size;
   uint64_t desc_phys, avail_phys, used_phys;
-  struct virtq_desc *desc;             /* HHDM-mapped */
-  struct virtq_avail_hdr *avail_hdr;   /* HHDM-mapped */
-  uint16_t *avail_ring;                /* right after avail_hdr */
-  struct virtq_used_hdr *used_hdr;     /* HHDM-mapped */
-  struct virtq_used_elem *used_ring;   /* right after used_hdr */
-  uint16_t last_used_idx;              /* our own consume cursor */
+  struct virtq_desc *desc;           // HHDM-mapped
+  struct virtq_avail_hdr *avail_hdr; // HHDM-mapped
+  uint16_t *avail_ring;              // right after avail_hdr
+  struct virtq_used_hdr *used_hdr;   // HHDM-mapped
+  struct virtq_used_elem *used_ring; // right after used_hdr
+  uint16_t last_used_idx;            // our own consume cursor
 };
 
-/* ---- virtio-blk request format (spec 5.2.6) ---- */
 struct PACKED virtio_blk_req_header {
   uint32_t type;
   uint32_t reserved;
   uint64_t sector;
 };
-#define VIRTIO_BLK_T_IN 0  /* read */
-#define VIRTIO_BLK_T_OUT 1 /* write */
+#define VIRTIO_BLK_T_IN 0  // read
+#define VIRTIO_BLK_T_OUT 1 // write
 #define VIRTIO_BLK_S_OK 0
 
 #define VIRTIO_BLK_SECTOR_SIZE 512
-#define VIRTIO_BLK_TIMEOUT_MS 5000 /* matches nvme.c's own conservative bound */
+#define VIRTIO_BLK_TIMEOUT_MS 5000
 
 struct virtio_blk_dev {
   struct pci_device dev;
   struct virtqueue vq;
   volatile uint16_t *notify_addr;
 
-  struct virtio_blk_req_header *req_hdr; /* HHDM-mapped, reused every request */
+  struct virtio_blk_req_header *req_hdr; // HHDM-mapped, reused per request
   uint64_t req_hdr_phys;
   uint8_t *req_status;
   uint64_t req_status_phys;
@@ -159,16 +133,8 @@ static const struct pci_device *find_virtio_blk_device(void) {
   return NULL;
 }
 
-/* Walks the PCI capability list looking for every vendor-specific
- * (id 0x09) capability, classifying each by its cfg_type byte and
- * MMIO-mapping the ones this driver needs. Unlike drivers/pci.c's own
- * pci_find_capability() (which stops at the FIRST match of a given
- * id), virtio-pci legitimately has several capabilities sharing id
- * 0x09 -- one per cfg_type -- so this has to walk the whole chain
- * itself rather than reusing that helper. Returns false if any of the
- * three required capabilities (common/notify/device config) is
- * missing, or points at a BAR this driver didn't find during
- * pci_scan(). */
+/* Walks every vendor-specific (id 0x09) capability, classifying each by
+ * cfg_type -- unlike pci_find_capability(), several share id 0x09 here. */
 static bool find_virtio_caps(struct pci_device *dev,
                              volatile struct virtio_pci_common_cfg **common_out,
                              volatile uint8_t **notify_base_out,
@@ -176,12 +142,12 @@ static bool find_virtio_caps(struct pci_device *dev,
                              volatile struct virtio_blk_config **device_cfg_out) {
   uint16_t status = pci_cfg_read16(dev->bus, dev->slot, dev->func, 0x06);
   if (!(status & (1u << 4))) {
-    return false; /* PCI_STATUS_CAP_LIST not set -- no capability list at all */
+    return false;
   }
 
   bool have_common = false, have_notify = false, have_device = false;
   uint8_t ptr = pci_cfg_read8(dev->bus, dev->slot, dev->func, 0x34) & 0xFC;
-  int guard = 0; /* same bounded-walk defensiveness as pci_find_capability() */
+  int guard = 0;
 
   while (ptr != 0 && guard++ < 64) {
     uint8_t id = pci_cfg_read8(dev->bus, dev->slot, dev->func, ptr);
@@ -223,11 +189,8 @@ static bool find_virtio_caps(struct pci_device *dev,
   return have_common && have_notify && have_device;
 }
 
-/* Negotiates the minimal feature subset: VIRTIO_F_VERSION_1 (bit 32)
- * and nothing else. A device that doesn't offer it is legacy-only --
- * unsupported by this driver, not worked around. */
 static bool negotiate_features(volatile struct virtio_pci_common_cfg *common) {
-  common->device_feature_select = 1; /* bits 32-63 */
+  common->device_feature_select = 1; // bits 32-63
   uint32_t features_hi = common->device_feature;
 
   if (!(features_hi & (1u << VIRTIO_F_VERSION_1_BIT))) {
@@ -236,9 +199,9 @@ static bool negotiate_features(volatile struct virtio_pci_common_cfg *common) {
     return false;
   }
 
-  common->driver_feature_select = 0; /* bits 0-31: none of them */
+  common->driver_feature_select = 0;
   common->driver_feature = 0;
-  common->driver_feature_select = 1; /* bits 32-63: just VERSION_1 */
+  common->driver_feature_select = 1;
   common->driver_feature = (1u << VIRTIO_F_VERSION_1_BIT);
 
   common->device_status = (uint8_t)(common->device_status | VIRTIO_STATUS_FEATURES_OK);
@@ -264,8 +227,7 @@ static bool virtqueue_alloc(struct virtqueue *vq, uint16_t size) {
   uint64_t avail_phys = pmm_alloc_pages(avail_pages);
   uint64_t used_phys = pmm_alloc_pages(used_pages);
   if (desc_phys == 0 || avail_phys == 0 || used_phys == 0) {
-    return false; /* leaks whichever of the three did succeed -- boot-time
-                      failure only, same tradeoff nvme.c's own init makes */
+    return false; // leaks whichever succeeded -- boot-time failure only
   }
 
   vq->size = size;
@@ -278,17 +240,12 @@ static bool virtqueue_alloc(struct virtqueue *vq, uint16_t size) {
   vq->used_hdr = (struct virtq_used_hdr *)phys_to_virt(used_phys);
   vq->used_ring =
       (struct virtq_used_elem *)((uint8_t *)vq->used_hdr + sizeof(*vq->used_hdr));
-  vq->last_used_idx = 0; /* pmm_alloc_pages() zeroes -- device's used.idx
-                             also starts at 0, so these agree from boot */
+  vq->last_used_idx = 0;
   return true;
 }
 
-static void virtio_blk_notify(void) { *g_vblk.notify_addr = 0; /* queue index 0 */ }
+static void virtio_blk_notify(void) { *g_vblk.notify_addr = 0; }
 
-/* Builds the fixed 3-descriptor chain (header -> data -> status) for
- * ONE request, submits it, and polls the used ring until it advances
- * or VIRTIO_BLK_TIMEOUT_MS elapses. No free-list, no concurrent
- * requests -- see the file header comment for why that's fine here. */
 static bool submit_and_wait(uint64_t sector, uint32_t sector_count, void *buf,
                             bool is_write) {
   if (!g_vblk.ready) {
@@ -298,7 +255,7 @@ static bool submit_and_wait(uint64_t sector, uint32_t sector_count, void *buf,
   g_vblk.req_hdr->type = is_write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
   g_vblk.req_hdr->reserved = 0;
   g_vblk.req_hdr->sector = sector;
-  *g_vblk.req_status = 0xFF; /* sentinel; the device must overwrite this */
+  *g_vblk.req_status = 0xFF; // sentinel; the device must overwrite this
 
   struct virtq_desc *desc = g_vblk.vq.desc;
 
@@ -318,12 +275,10 @@ static bool submit_and_wait(uint64_t sector, uint32_t sector_count, void *buf,
   desc[2].next = 0;
 
   uint16_t avail_slot = (uint16_t)(g_vblk.vq.avail_hdr->idx % g_vblk.vq.size);
-  g_vblk.vq.avail_ring[avail_slot] = 0; /* head descriptor index -- always 0 */
+  g_vblk.vq.avail_ring[avail_slot] = 0;
 
-  /* The device reads the avail ring over the bus -- make sure it sees
-   * the descriptor chain and ring entry above before it sees the
-   * incremented idx that tells it something's there. Same ordering
-   * concern nvme.c's own doorbell writes document, same fix. */
+  /* Make the descriptor chain visible before the idx bump the device
+   * polls on -- same ordering nvme.c's doorbell write documents. */
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   g_vblk.vq.avail_hdr->idx = (uint16_t)(g_vblk.vq.avail_hdr->idx + 1);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -366,9 +321,7 @@ static const struct blockdev_ops virtio_blk_blockdev_ops = {
 };
 
 bool virtio_blk_init(void) {
-  pci_scan(); /* safe to call again even if something else already did --
-                 see drivers/nvme.c's nvme_init(), which makes the same
-                 no-prior-scan-assumed choice */
+  pci_scan();
 
   const struct pci_device *found = find_virtio_blk_device();
   if (found == NULL) {
@@ -391,7 +344,6 @@ bool virtio_blk_init(void) {
     return false;
   }
 
-  /* Standard status-bit handshake, spec 3.1.1. */
   common->device_status = 0;
   uint64_t reset_deadline = timer_uptime_ms() + VIRTIO_BLK_TIMEOUT_MS;
   while (common->device_status != 0) {
@@ -412,10 +364,6 @@ bool virtio_blk_init(void) {
   common->queue_select = 0;
   uint16_t qsize = common->queue_size;
   if (qsize == 0 || qsize > 4096) {
-    /* 4096 is just a sanity ceiling against a hostile/broken device --
-       real hardware reports something like 128 or 256. We never try
-       to reduce a smaller, legal value -- see virtqueue_alloc()'s
-       call site for why accepting it unchanged is the safer choice. */
     kprintf("[virtio-blk] queue 0 reports an unusable size (%u)\n", qsize);
     common->device_status = VIRTIO_STATUS_FAILED;
     return false;
@@ -430,9 +378,7 @@ bool virtio_blk_init(void) {
   common->queue_desc = g_vblk.vq.desc_phys;
   common->queue_avail = g_vblk.vq.avail_phys;
   common->queue_used = g_vblk.vq.used_phys;
-  common->queue_msix_vector = VIRTIO_MSI_NO_VECTOR; /* polling only -- see
-                                                         the file header
-                                                         comment */
+  common->queue_msix_vector = VIRTIO_MSI_NO_VECTOR; // polling only
   common->queue_enable = 1;
 
   g_vblk.notify_addr = (volatile uint16_t *)(notify_base +
@@ -458,9 +404,6 @@ bool virtio_blk_init(void) {
           g_vblk.sector_count, VIRTIO_BLK_SECTOR_SIZE, g_vblk.dev.vendor_id,
           g_vblk.dev.device_id);
 
-  blockdev_register("virtio-blk", &virtio_blk_blockdev_ops); /* logs its own
-    outcome; a false return just means something else already claimed the
-    slot (e.g. NVMe init'd first) -- this driver is still fully usable via
-    its own virtio_blk_*() API either way */
+  blockdev_register("virtio-blk", &virtio_blk_blockdev_ops); // logs its own outcome
   return true;
 }

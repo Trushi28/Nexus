@@ -29,60 +29,21 @@ struct gnode {
   uint32_t edge_count;
   uint32_t refcount;
 
-  struct gnode *release_next; /* intrusive link: the release cascade's
-                                  own worklist (see release_cascade_locked()
-                                  in graph.c) -- mirrors the pending_exit/
-                                  parked_head pattern in sched/sched.c and
-                                  cpu/cpu.h: an explicit heap-free worklist
-                                  instead of recursion, so a long chain
-                                  (A->B->C->...) being released can't blow
-                                  the kernel stack. Scratch only -- has no
-                                  meaning outside of an active cascade. */
+  struct gnode *release_next; // scratch worklist for release_cascade_locked()
   bool gc_marked;
   struct gnode *reg_next;
 
-  uint32_t vfs_open_count; /* how many open classic-VFS fds
-                               (fs/graphfs_vfs.c) currently hold this
-                               node -- bumped by graph_node_retain()/
-                               graph_node_release(), which also bump
-                               the ordinary `refcount` above, so
-                               grm/gunlink/sstringrm's existing
-                               "refcount==0" checks already refuse to
-                               free a node an open fd is using.
-                               vfs_open_count exists on top of that
-                               purely so collect_cycles_locked()'s
-                               mark-and-sweep -- which does its own
-                               from-scratch reachability scan and
-                               never consults refcount at all -- knows
-                               to treat a held-open node as a GC root
-                               too, the same way an sstring anchor is
-                               one. */
+  /* Open classic-VFS fd count -- separate from refcount so
+   * collect_cycles_locked()'s from-scratch sweep treats an open fd as
+   * a GC root too, the same way an sstring anchor is one. */
+  uint32_t vfs_open_count;
   uint32_t owner_uid;
 
-  /* Whether fs/graphfs_vfs.c's classic-VFS adapter presents this node
-   * as a file or a directory -- decided ONCE, the moment the node
-   * gains its first outgoing edge (see graph_link()) or is explicitly
-   * created as a directory through the classic namespace (mkdir-style
-   * vfs_lookup_or_create(), or an intermediate path component --
-   * graphfs_node_create()/graphfs_root_create()), and never flips back.
-   * A gnode isn't inherently file-XOR-directory the way a real vnode
-   * is -- it can hold content AND outgoing edges at once -- so without
-   * a persisted decision here, the adapter used to recompute this from
-   * edge_count on every single access, meaning the SAME path could
-   * change shape (a file you could gcat one moment, a directory you
-   * could ls the next) as the graph evolved elsewhere. Defaults to
-   * VNODE_FILE (0), which is exactly what a fresh slab_alloc()'d gnode
-   * already zeroes to -- see graph_node_create(). */
+  /* File-vs-directory as presented by fs/graphfs_vfs.c -- decided once
+   * (first outgoing edge, or explicit mkdir) and never flips back. */
   enum vnode_type classic_type;
 
-  struct vnode vfs_node; /* embedded classic-VFS adapter for this node
-                             (see fs/graphfs_vfs.c) -- re-populated
-                             fresh on every access through that
-                             adapter, same trick tmpfs_node uses for
-                             its own embedded vnode. Owned by this
-                             allocation: freeing the gnode frees this
-                             along with it, no separate teardown
-                             needed. */
+  struct vnode vfs_node; // embedded classic-VFS adapter, see graphfs_vfs.c
 };
 
 void graph_init(void);
@@ -105,31 +66,15 @@ size_t graph_read(struct gnode *n, uint64_t offset, void *buf, size_t len);
 size_t graph_write(struct gnode *n, uint64_t offset, const void *buf,
                    size_t len);
 
-/* Resets a node's logical length to 0 -- same effect O_TRUNC has on a
- * classic file. The backing allocation (data/capacity) is left in
- * place, exactly like tmpfs_truncate()'s equivalent tradeoff, so a
- * later write reuses it instead of paying to free and reallocate. */
 void graph_truncate(struct gnode *n);
 
-/* Locked read of a node's current size and edge_count, for callers
- * outside graph.c (fs/graphfs_vfs.c) that need a consistent snapshot
- * of both without reaching into struct gnode directly and racing
- * graph_lock-protected mutations. Either output pointer may be NULL
- * if you only want the other. */
+/* Locked snapshot of a node's size/edge_count, for callers outside
+ * graph.c that need a consistent read without racing graph_lock. */
 void graph_node_snapshot(struct gnode *n, uint64_t *size_out,
                          uint32_t *edge_count_out);
 
-/* Takes/releases an external (classic-VFS) reference on a node --
- * called from fs/graphfs_vfs.c's open/close hooks, one retain per
- * successful vfs_open(), one release per matching vfs_close(). Makes
- * an open fd count exactly like an edge or sstring anchor for
- * refcount-based freeing (grm/gunlink/sstringrm already refuse a
- * nonzero-refcount node), and additionally marks the node as a GC
- * root for collect_cycles_locked(), which doesn't consult refcount at
- * all. graph_node_release() may free the node (same as any other
- * refcount hitting 0) if this was its last reference of any kind --
- * don't touch `n` again after calling it unless you independently
- * know something else still references it. */
+/* Takes/releases an external (classic-VFS) reference -- makes an open
+ * fd count like an edge or sstring anchor for refcount-based freeing. */
 void graph_node_retain(struct gnode *n);
 void graph_node_release(struct gnode *n);
 
@@ -144,8 +89,6 @@ struct gnode *sstring_get(const char *name);
 bool sstring_list(uint32_t index, char *name_out, size_t name_max);
 
 void sstring_unset(const char *name);
-
-/* ------------------------------ persistence ------------------------- */
 
 bool graph_save_to_disk(void);
 bool graph_load_from_disk(void);

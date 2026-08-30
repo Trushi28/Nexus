@@ -12,22 +12,18 @@
 #include "sched/sched.h"
 #include "time/timer.h"
 
-/* ---- controller register layout (NVMe Base Spec, "Controller
- * Registers") -- all offsets from BAR0, little-endian. ---- */
-#define NVME_REG_CAP 0x00  /* 64-bit: controller capabilities */
-#define NVME_REG_VS 0x08   /* 32-bit: version (unused here) */
-#define NVME_REG_CC 0x14   /* 32-bit: controller configuration */
-#define NVME_REG_CSTS 0x1C /* 32-bit: controller status */
-#define NVME_REG_AQA 0x24  /* 32-bit: admin queue attributes */
-#define NVME_REG_ASQ 0x28  /* 64-bit: admin submission queue base */
-#define NVME_REG_ACQ 0x30  /* 64-bit: admin completion queue base */
+#define NVME_REG_CAP 0x00  // 64-bit: controller capabilities
+#define NVME_REG_VS 0x08   // 32-bit: version (unused here)
+#define NVME_REG_CC 0x14   // 32-bit: controller configuration
+#define NVME_REG_CSTS 0x1C // 32-bit: controller status
+#define NVME_REG_AQA 0x24  // 32-bit: admin queue attributes
+#define NVME_REG_ASQ 0x28  // 64-bit: admin submission queue base
+#define NVME_REG_ACQ 0x30  // 64-bit: admin completion queue base
 #define NVME_REG_DOORBELL_BASE 0x1000
 
 #define NVME_CC_EN (1u << 0)
 #define NVME_CC_CSS_NVM (0u << 4)
-#define NVME_CC_MPS_SHIFT                                                      \
-  7 /* 0 here == 2^(12+0) == 4KiB, matching PAGE_SIZE                          \
-     */
+#define NVME_CC_MPS_SHIFT 7 // 0 here == 2^(12+0) == 4KiB, matching PAGE_SIZE
 #define NVME_CC_AMS_ROUND_ROBIN (0u << 11)
 #define NVME_CC_SHN_NONE (0u << 14)
 #define NVME_CC_IOSQES_SHIFT 16
@@ -36,8 +32,8 @@
 #define NVME_CSTS_RDY (1u << 0)
 #define NVME_CSTS_CFS (1u << 1)
 
-#define NVME_SQE_SIZE_LOG2 6 /* 64 bytes */
-#define NVME_CQE_SIZE_LOG2 4 /* 16 bytes */
+#define NVME_SQE_SIZE_LOG2 6 // 64 bytes
+#define NVME_CQE_SIZE_LOG2 4 // 16 bytes
 #define NVME_SQE_SIZE (1u << NVME_SQE_SIZE_LOG2)
 #define NVME_CQE_SIZE (1u << NVME_CQE_SIZE_LOG2)
 
@@ -53,9 +49,7 @@
 
 #define NVME_IDENTIFY_CNS_NAMESPACE 0x00
 
-/* Reset/command timeouts. A fixed conservative bound rather than
- * reading CAP.TO -- simpler, and 5s is generous for anything short of
- * genuinely broken hardware/emulation. */
+// Fixed conservative bound rather than reading CAP.TO -- 5s is generous.
 #define NVME_TIMEOUT_MS 5000
 
 struct PACKED nvme_sqe {
@@ -74,35 +68,32 @@ struct PACKED nvme_cqe {
   uint16_t sq_head;
   uint16_t sq_id;
   uint16_t cid;
-  uint16_t status; /* bit0 = phase tag, bits1-8 = SC, bits9-11 = SCT */
+  uint16_t status; // bit0 = phase tag, bits1-8 = SC, bits9-11 = SCT
 };
 
 struct PACKED nvme_identify_namespace {
-  uint64_t nsze;     /* offset 0: namespace size, in logical blocks */
-  uint64_t ncap;     /* offset 8 */
-  uint64_t nuse;     /* offset 16 */
-  uint8_t nsfeat;    /* offset 24 */
-  uint8_t nlbaf;     /* offset 25: number of LBA formats - 1 */
-  uint8_t flbas;     /* offset 26: bits0-3 = index of the in-use format */
-  uint8_t pad1[101]; /* offsets 27-127: fields v1 doesn't need */
+  uint64_t nsze;     // offset 0: namespace size, in logical blocks
+  uint64_t ncap;     // offset 8
+  uint64_t nuse;     // offset 16
+  uint8_t nsfeat;    // offset 24
+  uint8_t nlbaf;     // offset 25: number of LBA formats - 1
+  uint8_t flbas;     // offset 26: bits0-3 = index of the in-use format
+  uint8_t pad1[101]; // offsets 27-127: unused
   struct PACKED {
-    uint16_t ms;   /* metadata size */
-    uint8_t lbads; /* log2(LBA data size in bytes) */
-    uint8_t rp;    /* relative performance */
-  } lbaf[16];      /* offsets 128-191 */
-                   /* offsets 192-4095: vendor-specific / unused here */
+    uint16_t ms;   // metadata size
+    uint8_t lbads; // log2(LBA data size in bytes)
+    uint8_t rp;    // relative performance
+  } lbaf[16];      // offsets 128-191
 };
 
 struct nvme_queue {
-  struct nvme_sqe *sq; /* HHDM-mapped */
-  struct nvme_cqe *cq; /* HHDM-mapped */
+  struct nvme_sqe *sq; // HHDM-mapped
+  struct nvme_cqe *cq; // HHDM-mapped
   uint64_t sq_phys, cq_phys;
   uint16_t depth;
   uint16_t sq_tail;
   uint16_t cq_head;
-  bool phase; /* expected phase-tag value on the next
-                  unconsumed completion entry -- flips
-                  every time the completion queue wraps */
+  bool phase; // expected phase tag of the next completion; flips on wrap
   volatile uint32_t *sq_doorbell;
   volatile uint32_t *cq_doorbell;
   uint16_t next_cid;
@@ -112,7 +103,7 @@ struct nvme_queue {
 struct nvme_controller {
   struct pci_device dev;
   volatile uint8_t *regs;
-  uint32_t doorbell_stride; /* bytes between consecutive doorbell registers */
+  uint32_t doorbell_stride; // bytes between consecutive doorbell registers
   struct pci_msix msix;
   struct nvme_queue admin_q;
   struct nvme_queue io_q;
@@ -130,9 +121,8 @@ static void reg_write32(uint32_t off, uint32_t val) {
   *(volatile uint32_t *)(g_nvme.regs + off) = val;
 }
 static uint64_t reg_read64(uint32_t off) {
-  /* Two 32-bit accesses, not one 64-bit one -- keeps this correct
-   * even against a controller whose BAR only guarantees well-defined
-   * behaviour for dword-aligned accesses. */
+  /* Two 32-bit accesses, not one 64-bit -- correct even if the BAR only
+   * guarantees dword-aligned access. */
   uint32_t lo = reg_read32(off);
   uint32_t hi = reg_read32(off + 4);
   return ((uint64_t)hi << 32) | lo;
@@ -259,7 +249,7 @@ static bool create_io_sq(uint16_t qid, uint16_t depth, uint64_t sq_phys,
   cmd.cdw0 = NVME_OPC_CREATE_SQ;
   cmd.prp1 = sq_phys;
   cmd.cdw10 = ((uint32_t)(depth - 1) << 16) | qid;
-  cmd.cdw11 = ((uint32_t)cqid << 16) | 1u; /* CQID, QPRIO=0, PC=1 */
+  cmd.cdw11 = ((uint32_t)cqid << 16) | 1u; // CQID, QPRIO=0, PC=1
   return submit_and_wait(&g_nvme.admin_q, &cmd);
 }
 
@@ -383,26 +373,15 @@ bool nvme_init(void) {
     kprintf("[nvme] failed to create the I/O queue pair\n");
     return false;
   }
-  /* Partial-failure cleanup above is intentionally not implemented --
-   * this runs once at boot and failure just means "no disk", not
-   * "retry forever"; the couple of pages a failed bring-up leaks are
-   * noise against the rest of the kernel's memory. */
+  /* No partial-failure cleanup -- this runs once at boot; a leaked page or
+   * two on failure is noise against the rest of the kernel's memory. */
 
   g_nvme.ready = true;
   kprintf(
       "[nvme] ready: %lu sectors x %u bytes, admin depth %u, I/O depth %u\n",
       g_nvme.sector_count, g_nvme.sector_size, admin_depth, io_depth);
 
-  blockdev_register("nvme", &nvme_blockdev_ops); /* logs its own outcome;
-                                                      a false return here
-                                                      just means something
-                                                      else already claimed
-                                                      the slot -- NVMe
-                                                      itself is still
-                                                      fully usable via its
-                                                      own nvme_*() API
-                                                      either way (see
-                                                      nvmeinfo) */
+  blockdev_register("nvme", &nvme_blockdev_ops); // logs its own outcome
   return true;
 }
 
@@ -410,12 +389,8 @@ bool nvme_available(void) { return g_nvme.ready; }
 uint64_t nvme_sector_count(void) { return g_nvme.sector_count; }
 uint32_t nvme_sector_size(void) { return g_nvme.sector_size; }
 
-#define NVME_MAX_PRPLIST_ENTRIES                                               \
-  (PAGE_SIZE / sizeof(uint64_t)) /* 512 pointers per list page */
-/* PRP1 covers exactly one page (buf is required page-aligned); anything
- * beyond a second page goes through a single PRP-list page holding up
- * to 512 more page pointers. v1 doesn't chain multiple list pages, so
- * this is the hard ceiling on one request's size (~2MiB). */
+#define NVME_MAX_PRPLIST_ENTRIES (PAGE_SIZE / sizeof(uint64_t)) // 512 ptrs/page
+/* No PRP-list chaining -- one list page caps a single request at ~2MiB. */
 #define NVME_MAX_TRANSFER_BYTES ((1 + NVME_MAX_PRPLIST_ENTRIES) * PAGE_SIZE)
 
 static bool rw(uint64_t lba, uint32_t count, void *buf, bool is_write) {
@@ -461,7 +436,7 @@ static bool rw(uint64_t lba, uint32_t count, void *buf, bool is_write) {
   cmd.prp2 = prp2;
   cmd.cdw10 = (uint32_t)(lba & 0xFFFFFFFF);
   cmd.cdw11 = (uint32_t)(lba >> 32);
-  cmd.cdw12 = count - 1; /* NLB is 0-based */
+  cmd.cdw12 = count - 1; // NLB is 0-based
 
   bool ok = submit_and_wait(&g_nvme.io_q, &cmd);
 

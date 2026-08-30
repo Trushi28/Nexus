@@ -10,18 +10,6 @@ void vfs_set_root(struct vnode *root) { root_node = root; }
 
 struct vnode *vfs_root(void) { return root_node; }
 
-/* ------------------------------ mount table ------------------------------
- * Deliberately tiny and linear (VFS_MAX_MOUNTS entries, scanned start
- * to finish on every lookup) -- this kernel mounts a small, fixed
- * number of filesystems, not hundreds, so there's nothing here a hash
- * table would meaningfully speed up. Each mount's path is stored
- * pre-split into components (rather than as a raw string) so
- * find_mount() can compare it directly against the already-split
- * components walk() builds for the path being resolved, with no
- * string-prefix edge cases (partial component matches, redundant
- * slashes, etc) to worry about.
- * -------------------------------------------------------------------- */
-
 void vfs_init(void) {
   slab_cache_init(&vfs_file_cache, sizeof(struct vfs_file), "vfs_file");
 }
@@ -34,11 +22,6 @@ struct vfs_mount_entry {
 };
 static struct vfs_mount_entry mounts[VFS_MAX_MOUNTS];
 
-/* Splits `path` into up to `max_depth` '/'-separated components.
- * Structurally identical to walk()'s own tokenizer just below, kept
- * as its own copy rather than shared -- a mount path is a rare,
- * shallow, boot-time-ish operation, not worth threading a shared
- * helper's signature through walk()'s hot path for. */
 static int split_path(const char *path, char comps[][64], int max_depth) {
   int depth = 0;
   const char *p = path;
@@ -78,7 +61,7 @@ bool vfs_mount(const char *path, struct vnode *root) {
   char comps[VFS_MOUNT_MAX_DEPTH][64];
   int depth = split_path(path, comps, VFS_MOUNT_MAX_DEPTH);
   if (depth == 0) {
-    return false; /* "/" itself -- use vfs_set_root() instead */
+    return false;
   }
 
   int free_slot = -1;
@@ -90,11 +73,11 @@ bool vfs_mount(const char *path, struct vnode *root) {
       continue;
     }
     if (comps_equal(mounts[i].comps, mounts[i].depth, comps, depth)) {
-      return false; /* already mounted exactly here */
+      return false;
     }
   }
   if (free_slot < 0) {
-    return false; /* mount table full */
+    return false;
   }
 
   mounts[free_slot].used = true;
@@ -121,13 +104,8 @@ bool vfs_unmount(const char *path) {
   return false;
 }
 
-/* Finds the longest-matching mount whose component path is a prefix
- * of the first `depth` entries of `comps`. On a match, returns that
- * mount's root vnode and sets `*start_index` to how many leading
- * components of `comps` the mount already accounts for -- walk()
- * resumes from there instead of from index 0. Returns NULL (leaving
- * `*start_index` untouched) if nothing beyond the primary root
- * applies, which is the common case (no extra mounts registered). */
+/* Longest-matching mount whose path is a prefix of `comps`. Sets
+ * *start_index to how many leading components it already accounts for. */
 static struct vnode *find_mount(char comps[][64], int depth, int *start_index) {
   struct vfs_mount_entry *best = NULL;
 
@@ -156,13 +134,6 @@ static struct vnode *find_mount(char comps[][64], int depth, int *start_index) {
 
 #define VFS_MAX_DEPTH 16
 
-/* Splits `path` into up to VFS_MAX_DEPTH '/'-separated components and
- * walks the vnode tree from the root, optionally creating whatever's
- * missing along the way. Backs both vfs_lookup_path() (create_missing
- * = false, `create_uid` unused) and vfs_lookup_or_create() (every
- * freshly-created node is owned by `create_uid` -- see that
- * function's own comment in vfs.h). An empty path (or just "/")
- * returns the root itself, having walked zero components. */
 static struct vnode *walk(const char *path, bool create_missing,
                           enum vnode_type leaf_type, uint32_t create_uid) {
   if (root_node == NULL) {
@@ -202,16 +173,7 @@ static struct vnode *walk(const char *path, bool create_missing,
     bool is_last = (i == depth - 1);
 
     if (cur->ops->lookup == NULL) {
-      /* Every filesystem's own .lookup (tmpfs_lookup(), graphfs_*_lookup())
-       * is responsible for refusing descent into what it considers a
-       * plain file -- deliberately NOT enforced here via cur->type.
-       * tmpfs's type is fixed at creation; a graph node's is now also
-       * stable once set (see struct gnode::classic_type in graph.h),
-       * but neither filesystem's invariant belongs at this generic
-       * layer -- pushing the decision down to each filesystem's own
-       * ops is what lets a currently-childless-but-still-a-directory
-       * node correctly accept a new child here. */
-      return NULL;
+      return NULL; // each filesystem's own lookup refuses to descend into a file
     }
 
     struct vnode *child = cur->ops->lookup(cur, comps[i]);
@@ -234,14 +196,9 @@ static struct vnode *walk(const char *path, bool create_missing,
 }
 
 struct vnode *vfs_lookup_path(const char *path) {
-  return walk(path, false, VNODE_FILE, 0); /* create_uid unused --
-                                               create_missing is false */
+  return walk(path, false, VNODE_FILE, 0);
 }
 
-/* Component buffer width matches every other path tokenizer in this
- * codebase (walk()'s own `comps[VFS_MAX_DEPTH][64]` above, and the
- * shell-local copies this replaces) -- plenty for anything a person
- * types or a filesystem generates a name for. */
 #define VFS_RESOLVE_COMP_MAX 64
 
 void vfs_resolve_relative(const char *cwd, const char *in, char *out,
@@ -326,10 +283,6 @@ bool vfs_open_as(const char *path, int flags, uint32_t uid,
     return false;
   }
   if (wants_write && pre_existing && uid != 0 && n->owner_uid != uid) {
-    /* Refused outright, not silently degraded to read-only -- see
-     * struct vnode::owner_uid's comment in vfs.h. Everything else in
-     * this function is byte-for-byte what vfs_open() always did; this
-     * is the entire ownership boundary. */
     return false;
   }
 

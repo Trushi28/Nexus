@@ -21,16 +21,8 @@ struct sstring_entry {
   struct gnode *anchor;
 };
 static struct sstring_entry sstrings[SSTRING_MAX_ENTRIES];
-/* ---------------------------- dirty tracking ---------------------------
- * Plain atomics, not graph_lock -- a single bool needs cross-cpu
- * visibility, not mutual exclusion with the node/edge data it's
- * tracking. Set unconditionally by every mutating entry point below;
- * cleared by a successful save (graph_save_to_disk() clears it BEFORE
- * taking the snapshot, not after -- see that function for why) or a
- * successful load (a freshly loaded graph matches disk by
- * definition, even though the internal graph_link()/sstring_set()/
- * graph_write() calls deserialize_graph() makes along the way each
- * set the flag individually). */
+
+// Plain atomic, not graph_lock -- needs cross-cpu visibility, not mutual exclusion.
 static volatile bool graph_dirty = false;
 
 static void graph_mark_dirty(void) {
@@ -80,24 +72,10 @@ static struct gedge *find_edge_locked(struct gnode *from, const char *name) {
   return NULL;
 }
 
-/* Caller holds graph_lock. Frees `start` (already known to have
- * refcount == 0) and cascades: for each of its outgoing edges,
- * decrements that target's refcount and, if it now hits 0 too, queues
- * the same treatment for it. Iterative via an explicit worklist
- * (struct gnode::release_next) rather than recursive -- see that
- * field's comment in graph.h for why. Returns the total number of
- * nodes actually freed (>= 1).
- *
- * Never collects a reference cycle: a node inside one keeps a nonzero
- * refcount forever via the very edges that make it a cycle, so it
- * never gets pushed onto the worklist to begin with. See the file
- * header comment in graph.h -- this is a deliberate, permanent v1
- * boundary, not a bug.
- *
- * Registry removal is a linear scan per freed node -- O(n) per node,
- * so O(n^2) for a large cascade. Fine for the graph sizes this is
- * built for (interactive shell use, capped snapshot size); worth a
- * doubly-linked registry if that ever stops being true. */
+/* Caller holds graph_lock. Frees `start` and cascades: each freed
+ * node's edges decrement their targets, queuing any that now hit 0.
+ * Iterative via release_next, not recursive, so a long chain can't
+ * blow the kernel stack. Never collects a reference cycle -- see ggc. */
 static uint32_t release_cascade_locked(struct gnode *start) {
   uint32_t freed = 0;
   struct gnode *worklist = start;
@@ -108,7 +86,7 @@ static uint32_t release_cascade_locked(struct gnode *start) {
     worklist = n->release_next;
 
     if (n->refcount != 0) {
-      continue; /* re-referenced by something since being queued */
+      continue; // re-referenced since being queued
     }
 
     struct gnode **pp = &registry_head;
@@ -119,13 +97,7 @@ static uint32_t release_cascade_locked(struct gnode *start) {
       *pp = n->reg_next;
     }
 
-    /* Defensive only: a correctly-maintained refcount makes this
-     * unreachable (an active sstring anchor always holds a
-     * reference, so its target can never legitimately hit 0 here)
-     * -- but a dangling sstring pointing at freed memory is a far
-     * worse failure than one extra bounded loop, so scrub anyway
-     * rather than trust the invariant to never be violated by a
-     * future bug elsewhere. */
+    // Defensive scrub against a dangling sstring -- should be unreachable.
     for (uint32_t i = 0; i < SSTRING_MAX_ENTRIES; i++) {
       if (sstrings[i].used && sstrings[i].anchor == n) {
         sstrings[i].used = false;
@@ -154,14 +126,9 @@ static uint32_t release_cascade_locked(struct gnode *start) {
   return freed;
 }
 
-/* Caller holds graph_lock. Mark-and-sweep over the CURRENT anchor set:
- * BFS-marks everything reachable from every sstring anchor, then frees
- * every registered node the BFS never reached. Shared by
- * graph_collect_cycles() (the standalone `ggc` command -- collects
- * against whatever anchors currently exist) and graph_clear_all()
- * (which has already dropped every anchor by the time it calls this,
- * so here "unreachable" correctly means "everything" -- see that
- * function's own comment). Returns the number of nodes freed. */
+/* Caller holds graph_lock. Mark-and-sweep over the current anchor set
+ * (plus open-fd roots): BFS-marks everything reachable, frees whatever
+ * the sweep never reached. Shared by ggc and gclear. */
 static uint32_t collect_cycles_locked(void) {
   for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
     n->gc_marked = false;
@@ -180,14 +147,8 @@ static uint32_t collect_cycles_locked(void) {
     }
   }
 
-  /* A node with an open classic-VFS fd is a root too, exactly like an
-   * sstring anchor -- ordinary refcounting (graph_node_retain(), via
-   * grm/gunlink/sstringrm's "refcount==0" checks) already stops those
-   * three from freeing a held-open node, but THIS scan doesn't
-   * consult refcount at all -- it rebuilds reachability from scratch
-   * every time, so without this a node reachable only through an open
-   * fd (no anchor, no incoming edge) would look exactly like an
-   * unreachable cycle and get swept anyway, leaving that fd dangling. */
+  /* An open classic-VFS fd is a root too -- this scan rebuilds
+   * reachability from scratch and doesn't consult refcount at all. */
   for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
     if (n->vfs_open_count > 0 && !n->gc_marked) {
       n->gc_marked = true;
@@ -210,10 +171,7 @@ static uint32_t collect_cycles_locked(void) {
     }
   }
 
-  /* Snapshot every unmarked node into its own list BEFORE freeing any
-   * of them -- freeing mutates registry_head/reg_next out from under
-   * a live iterator over that same list, same reasoning as
-   * graph_clear_all()'s old orphan pass used. */
+  // Snapshot every unmarked node before freeing any -- freeing mutates reg_next.
   struct gnode *dead = NULL;
   uint32_t dead_count = 0;
   for (struct gnode *n = registry_head; n != NULL; n = n->reg_next) {
@@ -237,23 +195,10 @@ static uint32_t collect_cycles_locked(void) {
     }
   }
 
-  /* Free every dead node's own storage. An edge target that's ALSO
-   * unmarked (another member of the same cycle/dead group) is left
-   * alone -- it's already slated for the same fate elsewhere in this
-   * same `dead` list, so decrementing its refcount would be
-   * meaningless bookkeeping for a value nobody will read again, and
-   * could otherwise trigger a redundant release_cascade_locked() on a
-   * node this very loop is about to free directly anyway. An edge
-   * target that IS marked (a live, externally-reachable node this
-   * dead group merely happened to point at) gets a real decrement --
-   * and if that's genuinely its last reference, it goes through the
-   * ordinary release_cascade_locked() path, exactly as if a live
-   * gunlink had just severed the edge. That decrement can never
-   * prematurely free a live target out from under a second dead-group
-   * edge pointing at the same node: a target only stays "marked" in
-   * the first place because SOME live path (an anchor or a live
-   * node's edge) reaches it independent of anything in `dead`, so its
-   * refcount can never be reduced to 0 by dead-group edges alone. */
+  /* An edge into another dead node is skipped (it's already slated
+   * for the same fate); an edge into a still-marked node gets a real
+   * decrement, which can never prematurely free it -- see graph.c's
+   * own history for the full argument. */
   uint32_t freed = 0;
   for (struct gnode *n = dead; n != NULL;) {
     struct gnode *next_dead = n->release_next;
@@ -300,13 +245,9 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
   if (existing != NULL) {
     struct gnode *old_target = existing->target;
     existing->target = to;
-    /* Increment the NEW target before decrementing the old one --
-     * not the other way around. If `to` and `old_target` happen to
-     * be the same node (repointing an edge at what it already
-     * pointed to), decrementing first would transiently touch 0
-     * and could free a node this same line is about to
-     * re-reference. See this turn's design note for the full
-     * reasoning. */
+    /* Increment the new target before decrementing the old one -- if
+     * they're the same node, decrementing first could transiently
+     * hit 0 and free what this line is about to re-reference. */
     to->refcount++;
     old_target->refcount--;
     if (old_target->refcount == 0) {
@@ -345,14 +286,7 @@ void graph_link(struct gnode *from, const char *edge_name, struct gnode *to) {
   from->edges = e;
   from->edge_count++;
   to->refcount++;
-  /* `from` just gained its first-or-later outgoing edge -- from this
-   * point on the classic-VFS adapter (fs/graphfs_vfs.c) always
-   * presents it as a directory, permanently (see struct gnode's
-   * classic_type comment). Only the 0-edges-to-1 transition needs
-   * this: the two "repoint an existing edge" paths above don't change
-   * edge_count at all, so `from` was already correctly typed by
-   * whatever call first linked an edge onto it. */
-  from->classic_type = VNODE_DIR;
+  from->classic_type = VNODE_DIR; // first outgoing edge -- permanent
   spinlock_release_irqrestore(&graph_lock, f);
   graph_mark_dirty();
 }
@@ -587,9 +521,7 @@ bool sstring_set(const char *name, struct gnode *anchor) {
     if (sstrings[i].used && strcmp(sstrings[i].name, name) == 0) {
       struct gnode *old_anchor = sstrings[i].anchor;
       sstrings[i].anchor = anchor;
-      /* Same increment-before-decrement ordering as graph_link()'s
-       * repoint path, and for the identical reason. */
-      anchor->refcount++;
+      anchor->refcount++; // increment-before-decrement, see graph_link()
       old_anchor->refcount--;
       if (old_anchor->refcount == 0) {
         release_cascade_locked(old_anchor);
@@ -674,11 +606,6 @@ void sstring_unset(const char *name) {
   kprintf("[graph] no sstring anchor named '%s'\n", name);
 }
 
-/* Splits `path` into up to GRAPH_MAX_DEPTH '/'-separated components --
- * the tokenizer graph_resolve()/graph_touch()/graph_remove_path() all
- * need (an empty component from a leading/doubled/trailing '/' is
- * simply skipped, never stored). Factored out once a third caller
- * needed it -- see graph_remove_path()'s own comment. */
 static int graph_split_path(const char *path, char comps[][GEDGE_NAME_MAX]) {
   int depth = 0;
   const char *p = path;
@@ -772,22 +699,9 @@ struct gnode *graph_touch(const char *path, bool *out_created) {
   return cur;
 }
 
-/* The removal counterpart to graph_touch(): walks `path` down to its
- * second-to-last component, then drops whatever reference reaches
- * the LAST one -- sstring_unset() if the path is exactly one
- * component (an anchor name), or graph_unlink() from its parent
- * otherwise. That's the exact same reference graph_resolve()/
- * graph_touch() would have walked through to reach that node, so
- * removing it here is symmetric with how the path got there in the
- * first place. This is what lets `grm <path>` (shell/shell.c) behave
- * the way a real `rm` does -- act on the path, not on the node's bare
- * refcount -- instead of requiring the caller to already know whether
- * the thing they typed is reachable via an sstring anchor (needs
- * sstringrm) or an edge (needs gunlink) before grm will do anything.
- * sstring_unset()/graph_unlink() log their own outcome, including
- * freeing whatever that was the last reference to. Returns false
- * (having logged why) if any component along the way, including the
- * last one, doesn't actually exist. */
+/* Walks to `path`'s second-to-last component, then drops whatever
+ * reaches the last one (sstring_unset() or graph_unlink()) -- the
+ * `rm <path>` primitive shell.c's cmd_grm() builds on. */
 bool graph_remove_path(const char *path) {
   char comps[GRAPH_MAX_DEPTH][GEDGE_NAME_MAX];
   int depth = graph_split_path(path, comps);
@@ -1066,37 +980,9 @@ static bool deserialize_graph(const uint8_t *buf, size_t len) {
   return true;
 }
 
-/* ------------------------------ disk gate -------------------------------
- * fs/graph.c used to hand-roll its own CAS-spin-and-yield lock here,
- * serializing graph_save_to_disk()/graph_load_from_disk() against
- * each other and against the autosave task (main.c's
- * graph_autosave_task()) across each function's ENTIRE multi-step
- * body. That's gone now: drivers/blockdev.c's blockdev_read()/
- * blockdev_write() serialize themselves against any concurrent
- * caller, kernel-wide, at the level of a single call -- see that
- * file's own comment for why the guarantee has to live there instead
- * of here (every future caller of the HAL needs it, not just this
- * file's two functions).
- *
- * That changes the GRANULARITY of what's atomic below (each
- * blockdev_write()/blockdev_read() call is now its own critical
- * section, not the whole superblock-then-payload sequence as one
- * unit) but not the SAFETY of what ends up on disk. What actually
- * protects a concurrent gload() from a save landing in the middle of
- * it was always the checksum in struct graph_disk_superblock, not a
- * lock spanning both functions: if a save's writes and a load's reads
- * interleave, the load either sees the fully-old pairing (both stale,
- * self-consistent, checksum matches) or the fully-new one (both
- * fresh, checksum matches) -- or, in the narrow window where it reads
- * a superblock from one moment and payload bytes from another, the
- * checksum simply won't match, and graph_load_from_disk() already
- * does exactly the right thing there: refuses to load rather than
- * reconstructing a torn mix. See that function's checksum check
- * below. The realistic exposure to that window is small besides:
- * gload() already refuses to run against a non-empty in-memory graph,
- * so it's a rare, deliberate, single-shot shell action -- not
- * something racing autosave on every cycle the way two overlapping
- * saves could. */
+/* blockdev.c's I/O lock now serializes save/load against each other and
+ * against autosave at the level of a single call, not this function's
+ * whole body -- the superblock checksum is what catches a torn overlap. */
 
 bool graph_save_to_disk(void) {
   if (!blockdev_available()) {
@@ -1104,12 +990,8 @@ bool graph_save_to_disk(void) {
     return false;
   }
 
-  /* Clear dirty BEFORE the snapshot, not after writing it to disk. A
-   * mutation landing after this point just re-sets the flag (every
-   * mutator does so unconditionally), so the worst case is one extra
-   * autosave cycle later. Clearing after the write instead could
-   * silently lose exactly that mutation: the snapshot already on
-   * disk wouldn't have it, but the flag would say "clean" anyway. */
+  /* Clear dirty BEFORE snapshotting, not after -- a mutation landing
+   * after this just re-sets the flag, costing one extra autosave cycle. */
   graph_clear_dirty();
 
   uint64_t buf_pages = DIV_ROUND_UP(GRAPH_SNAPSHOT_MAX_BYTES, PAGE_SIZE);

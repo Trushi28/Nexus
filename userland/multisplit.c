@@ -1,15 +1,5 @@
 #include "ulib.h"
 
-/* Exercises wait_any(): splits three children with staggered sleeps,
- * then reaps them via u_wait_any() in whatever order they ACTUALLY
- * finish (shortest sleep first), not creation order -- proving it's
- * really "whoever's done next," not secretly "child 1, then 2, then
- * 3." A final call after all three are gone should report there's
- * nothing left. `ps` while this is running (from the other shell, or
- * quickly from this one before they all finish) is also a good way to
- * see the name-tiebreak in action: each child shows up as
- * "<this path>~<pid>", not three identical entries. */
-
 struct worker_spec {
   unsigned sleep_ms;
 };
@@ -22,10 +12,6 @@ static void worker(void *arg) {
   u_itoa(u_getpid(), buf);
   u_print(buf);
   u_print(" done\n");
-  /* Returning here (rather than calling anything exit-like directly)
-   * is the intended way to end a split() child -- _split_trampoline
-   * (crt0.S) converts an ordinary return into exit(0) automatically,
-   * the same safety net crt0's own _start gives main(). */
 }
 
 int main(void) {

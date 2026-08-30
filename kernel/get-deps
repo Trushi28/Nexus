@@ -1,39 +1,13 @@
 #! /bin/sh
 
-# Fetches the one small, permissively-licensed header this kernel
-# still needs that isn't (and shouldn't be) vendored in the
-# repository:
-#
-#   include/limine.h   the Limine boot protocol header (BSD-2-Clause)
-#
-# Lands under $BUILD_DIR/include (a build artifact, not repo content --
-# see docs/BUILD_LAYOUT.md) instead of kernel/include, so `rm -rf build`
-# is the one command that gets you back to a totally clean checkout.
-#
-# The console/splash font used to be fetched here too
-# (font8x8_basic.h, from dhepper/font8x8) -- it's gone as of
-# video/nx_font8x8.h/.c, which is Nexus's own font, vendored directly
-# in the repo instead of fetched at build time. See that header's
-# comment for why (a linker "multiple definition" error the moment a
-# second .c file included the old header, since its array turned out
-# to have external linkage).
-#
-# Re-run this (or just `rm -rf $BUILD_DIR/.deps-obtained && make`) to
-# refresh limine.h against a newer protocol revision.
-
 set -ex
 
-# Always operate relative to this script's own directory (kernel/),
-# regardless of where `make` was invoked from.
 cd "$(dirname "$0")"
 
 : "${BUILD_DIR:=../build/kernel}"
 
 mkdir -p "$BUILD_DIR/include"
 
-curl -Lo "$BUILD_DIR/include/limine.h" \
-    https://raw.githubusercontent.com/Limine-Bootloader/limine-protocol/trunk/include/limine.h
+curl -Lo "$BUILD_DIR/include/limine.h"  https://raw.githubusercontent.com/Limine-Bootloader/limine-protocol/trunk/include/limine.h
 
-# Marker so the Makefile doesn't re-fetch on every build. Deleting
-# $BUILD_DIR (or just `make distclean`) forces a re-fetch.
 touch "$BUILD_DIR/.deps-obtained"
