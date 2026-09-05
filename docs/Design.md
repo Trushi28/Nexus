@@ -149,7 +149,7 @@ list and build instructions.
   that arrived some other way (typically GraphFS file content).
 - No per-task stdin isolation — every ring-3 task shares one keyboard
   ring buffer with no foreground-job concept, which makes interactive
-  stdin-reading programs unsuitable as Loom strands.
+  stdin-reading programs unsuitable as /bin/init-supervised services.
 
 ## Kernel command line
 
@@ -161,9 +161,9 @@ Set from `limine.conf`'s `cmdline:` lines, or edited directly:
 - `kshell` — boot into the ring-0 kernel shell (`shell/shell.c`)
   instead of nsh (`/bin/nsh`), the default interactive target. The
   kernel shell is where every privileged/diagnostic command lives
-  (`lspci`, `meminfo`, `reboot`/`shutdown`, `loom`, the native graph
-  commands with `gsync`/`gload`/`ggc`/`gclear`) — nsh only has what's
-  reachable through the ordinary syscall ABI.
+  (`lspci`, `meminfo`, `reboot`/`shutdown`, the native graph commands
+  with `gsync`/`gload`/`ggc`/`gclear`) — nsh only has what's reachable
+  through the ordinary syscall ABI.
 
 ## Build dependencies
 

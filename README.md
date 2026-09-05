@@ -31,9 +31,9 @@ from scratch rather than borrowed from the bootloader.
 - **Scheduling** — preemptive round-robin, sleep/wait queues, cooperative context switching
 - **Usermode** — ring-3 processes, an ELF64 loader, and a real, deliberately non-POSIX syscall ABI: `split()`/`exec()` instead of fork, plus `read`/`write`/`open`/`close`/`spawn`/`wait`/`wait_any`/`kill`/`ps`/`getuid`/`setuid`/`chdir`/`getcwd`/`brk`/`sysinfo`/`reboot`/`shutdown` and more
 - **Filesystem** — GraphFS (a DAG-based filesystem with multi-parent nodes, mark-and-sweep GC, and whole-graph snapshot persistence to disk) as the primary root; `/bin` seeded from a USTAR initrd on every boot
-- **Init** — Loom, a service-supervision system with dependency ordering (Kahn's algorithm) and crash-loop protection, built on top of GraphFS
+- **Init** — `/bin/init`, a userland service supervisor reading plain service definitions straight out of GraphFS (`/services/<name>/{path,uid,respawn,needs/}`), with launch-order dependency handling and crash-loop protection
 - **Drivers** — serial, framebuffer console, PS/2 keyboard, PCI scanner, NVMe (MSI-X), virtio-blk (polled, unverified against real hardware)
-- **Shell** — nsh (ring-3, the default interactive shell) plus a ring-0 kernel shell (`kshell` on the cmdline) for privileged/diagnostic commands: `meminfo`, `cpuinfo`, `ps`, `lspci`, `run`, `matrix`, `reboot`, `loom`, native graph commands (`gsync`/`gload`/`ggc`/`gclear`/...)
+- **Shell** — nsh (ring-3, the default interactive shell) plus a ring-0 kernel shell (`kshell` on the cmdline) for privileged/diagnostic commands: `meminfo`, `cpuinfo`, `ps`, `lspci`, `run`, `matrix`, `reboot`, native graph commands (`gsync`/`gload`/`ggc`/`gclear`/...)
 
 ## Getting started
 

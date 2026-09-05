@@ -707,7 +707,7 @@ static void print_banner(void) {
   banner_rule_top();
   banner_line("NEXUS -- nsh, the default ring-3 shell");
   banner_line("type 'help' for commands, 'exit' to leave");
-  banner_line("need lspci / loom / native graph admin? boot with 'kshell'");
+  banner_line("need lspci / native graph admin? boot with 'kshell'");
   banner_rule_bottom();
 
   nx_sysinfo_t info;

@@ -17,7 +17,7 @@ CFLAGS := -Wall -Wextra -std=gnu11 -O2 \
 
 LDFLAGS := -m elf_x86_64 -static -no-pie -T user.ld
 
-PROGRAMS := hello sysinfo guess nsh mkfile splitdemo multisplit
+PROGRAMS := hello sysinfo guess nsh mkfile splitdemo multisplit init
 
 LIBNEXUS := $(LIBDIR)/libnexus.a
 CRT0_OBJ := $(OBJDIR)/libc/crt0.S.o

@@ -5,7 +5,7 @@
 # Pin a known-good Limine release. Bump this if you want a newer bootloader.
 LIMINE_VERSION := v12.5.2
 
-QEMUFLAGS := -m 2G -smp 4 -cpu qemu64,+x2apic  
+QEMUFLAGS := -m 2G -smp 4 -cpu qemu64,+x2apic -serial stdio 
 
 override IMAGE_NAME := nexus
 
@@ -176,7 +176,7 @@ kernel:
 userland:
 	$(MAKE) -C userland BUILD_DIR=$(BUILD_DIR)/userland
 
-INITRD_PROGRAMS := hello sysinfo guess nsh mkfile splitdemo multisplit
+INITRD_PROGRAMS := hello sysinfo guess nsh mkfile splitdemo multisplit init
 
 # A plain ustar archive of every built userland program, under /bin --
 # unpacked into tmpfs at boot by fs/initrd.c. `--format=ustar` is

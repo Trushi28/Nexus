@@ -16,8 +16,8 @@
 #include "fs/graph.h"
 #include "fs/graphfs_vfs.h"
 #include "fs/initrd.h"
+#include "fs/tmpfs.h"
 #include "fs/vfs.h"
-#include "init/loom.h"
 #include "klib/klib.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -66,6 +66,86 @@ static void selftest_task(void *arg) {
   task_exit();
 }
 
+/*
+ * PID-1 replacement for loomd -- see userland/init.c for the actual
+ * service-supervision logic (reading "/services" out of GraphFS via
+ * ordinary syscalls). This kernel-side task's only job is to keep
+ * SOME /bin/init alive: if it dies (crash, or a bug), restart it
+ * after a short delay rather than leaving the machine with nothing
+ * driving it at all. Same crash-loop-then-give-up shape the old
+ * direct-nsh-spawn fallback used when /bin/nsh was missing.
+ */
+#define INIT_RESTART_DELAY_MS 1000
+#define INIT_MAX_RAPID_RESTARTS 5
+#define INIT_RESTART_WINDOW_MS 5000
+
+static void init_task(void *arg) {
+  (void)arg;
+  uint64_t restart_count = 0;
+  uint64_t window_start = timer_uptime_ms();
+
+  for (;;) {
+    struct task *init = process_spawn("/bin/init", "init", 0);
+    if (init == NULL) {
+      kprintf("[boot] /bin/init not found -- falling back to the "
+              "ring-0 kernel shell (see 'kshell' on the cmdline to "
+              "always get this on purpose)\n");
+      task_create("shell", shell_task, NULL);
+      task_exit();
+    }
+
+    int code = process_wait(init);
+    kprintf("[boot] /bin/init exited with code %d\n", code);
+
+    uint64_t now = timer_uptime_ms();
+    if (now - window_start < INIT_RESTART_WINDOW_MS) {
+      restart_count++;
+    } else {
+      restart_count = 1;
+      window_start = now;
+    }
+    if (restart_count > INIT_MAX_RAPID_RESTARTS) {
+      kprintf("[boot] /bin/init crash-looped -- falling back to the "
+              "ring-0 kernel shell instead of retrying forever\n");
+      task_create("shell", shell_task, NULL);
+      task_exit();
+    }
+
+    sched_sleep_ms(INIT_RESTART_DELAY_MS);
+  }
+}
+
+/*
+ * Seeds "/services/nsh" with sane defaults the very first time this
+ * graph is ever populated -- mirrors typing gtouch/gwrite by hand at
+ * the kernel shell, just done once in C so a fresh boot still reaches
+ * an interactive shell with no manual setup required. Skipped
+ * whenever "services" already resolves to something -- either a
+ * graph_load_from_disk() snapshot from a previous session, or a
+ * service someone already defined this session -- so this never
+ * clobbers real state.
+ */
+static void seed_default_services(void) {
+  if (sstring_get("services") != NULL) {
+    return;
+  }
+
+  bool created;
+  struct gnode *path = graph_touch("services/nsh/path", &created);
+  if (path != NULL) {
+    graph_write(path, 0, "/bin/nsh", 8);
+  }
+  struct gnode *respawn = graph_touch("services/nsh/respawn", &created);
+  if (respawn != NULL) {
+    graph_write(respawn, 0, "always", 6);
+  }
+  struct gnode *uid = graph_touch("services/nsh/uid", &created);
+  if (uid != NULL) {
+    graph_write(uid, 0, "0", 1);
+  }
+  kprintf("[boot] seeded default service '/services/nsh' (fresh graph)\n");
+}
+
 static void blockdev_init_task(void *arg) {
   (void)arg;
 
@@ -84,17 +164,11 @@ static void blockdev_init_task(void *arg) {
     kprintf("[boot] no initrd module found -- '/bin' will be empty\n");
   }
 
-  loom_boot();
   if (strstr(g_boot.cmdline, "kshell") != NULL) {
     task_create("shell", shell_task, NULL);
   } else {
-    struct task *nsh = process_spawn("/bin/nsh", "nsh", 0);
-    if (nsh == NULL) {
-      kprintf("[boot] couldn't spawn /bin/nsh -- falling back to the "
-              "ring-0 kernel shell (see 'kshell' on the cmdline to "
-              "always get this on purpose)\n");
-      task_create("shell", shell_task, NULL);
-    }
+    seed_default_services();
+    task_create("init", init_task, NULL);
   }
 
   if (strstr(g_boot.cmdline, "selftest") != NULL) {
@@ -162,7 +236,14 @@ NORETURN void kmain(void) {
   graph_init();
 
   vfs_set_root(graphfs_vfs_root());
-  loom_init();
+  /* Ephemeral, non-persisted state -- doesn't ride along with
+   * GraphFS's whole-graph snapshot the way anything under the graphfs
+   * root does, which is exactly the point: scratch files and runtime
+   * sockets/pidfiles shouldn't survive a reboot or bloat gsync's
+   * payload. vfs_mount() grafts these in without requiring "tmp"/
+   * "run" to exist as graph nodes -- see fs/vfs.c's find_mount(). */
+  vfs_mount("/tmp", tmpfs_create_root());
+  vfs_mount("/run", tmpfs_create_root());
   splash_progress(65, "filesystem");
 
   timer_calibrate();
